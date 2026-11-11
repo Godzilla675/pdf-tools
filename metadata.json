@@ -1,0 +1,6 @@
+{
+  "name": "pdf tools",
+  "description": "100% offline-capable PDF suite with all 33 PDF tools, interactive canvas studio, and automated workflows.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
