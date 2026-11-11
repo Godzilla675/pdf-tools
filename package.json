@@ -1,13 +1,17 @@
 {
-  "name": "react-example",
+  "name": "mono-pdf",
+  "productName": "Mono PDF",
+  "version": "1.0.0",
+  "description": "Offline Monochrome PDF Suite for macOS",
+  "main": "electron/main.cjs",
   "private": true,
-  "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "vite",
     "start": "node server.ts",
     "build": "vite build",
     "preview": "vite preview",
+    "dist:mac": "vite build && electron-builder --mac dmg zip --publish never",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },
@@ -34,14 +38,52 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
-    "typescript": "^7.0.2",
-    "@types/express": "^4.17.21"
+    "typescript": "^7.0.2"
+  },
+  "build": {
+    "appId": "com.monopdf.desktop",
+    "productName": "Mono PDF",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "sign": false
+    }
   }
 }
