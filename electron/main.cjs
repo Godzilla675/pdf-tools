@@ -2,13 +2,15 @@ const { app, BrowserWindow, shell, Menu } = require('electron');
 const path = require('path');
 
 function createWindow() {
+  const isMac = process.platform === 'darwin';
+
   const mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 1024,
     minHeight: 700,
     backgroundColor: '#09090b',
-    titleBarStyle: 'hiddenInset',
+    titleBarStyle: isMac ? 'hiddenInset' : 'default',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -31,8 +33,9 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  const isMac = process.platform === 'darwin';
   const template = [
-    { role: 'appMenu' },
+    ...(isMac ? [{ role: 'appMenu' }] : []),
     { role: 'fileMenu' },
     { role: 'editMenu' },
     { role: 'viewMenu' },

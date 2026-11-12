@@ -1,0 +1,123 @@
+name: Build and Release Desktop Apps (macOS & Windows)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Build Frontend and Package macOS DMG
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npm run dist:mac
+
+      - name: List generated release files
+        run: ls -lh release/
+
+      - name: Upload macOS Artifacts to Workflow Run
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mono-PDF-macOS-Installers
+          path: |
+            release/*.dmg
+            release/*.zip
+
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Build Frontend and Package Windows EXE
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npm run dist:win
+
+      - name: List generated release files
+        shell: bash
+        run: ls -lh release/
+
+      - name: Upload Windows Artifacts to Workflow Run
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mono-PDF-Windows-Installers
+          path: |
+            release/*.exe
+
+  publish-release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Display downloaded files
+        run: ls -R artifacts/
+
+      - name: Flatten release files
+        run: |
+          mkdir -p release-files
+          find artifacts/ -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" \) -exec cp {} release-files/ \;
+          ls -lh release-files/
+
+      - name: Create or Update GitHub Release with Installers
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0
+          name: "Mono PDF v1.0.0 (Desktop Offline Edition)"
+          body: |
+            ## Mono PDF Desktop (100% Offline)
+            Download the installer for your operating system below:
+
+            ### macOS
+            - **Apple Silicon (M1 / M2 / M3 / M4 / M5):** `Mono PDF-1.0.0-arm64.dmg`
+            - **Intel Mac:** `Mono PDF-1.0.0.dmg`
+            - **ZIP Package:** `Mono.PDF-1.0.0-arm64-mac.zip`
+
+            > **Note on first launch for macOS (Unsigned App):** If macOS says the app is unverified, right-click `Mono PDF.app` -> click **Open**, or run:
+            > `xattr -cr "/Applications/Mono PDF.app"` in Terminal.
+
+            ### Windows
+            - **Installer (.exe):** `Mono PDF Setup 1.0.0.exe` (NSIS installer with Desktop and Start Menu shortcuts)
+            - **Portable (.exe):** `Mono PDF 1.0.0.exe` (Standalone single file executable, no installation needed)
+
+            > **Note on first launch for Windows (SmartScreen):** If Windows SmartScreen appears, click **More info** -> **Run anyway**.
+          draft: false
+          prerelease: false
+          files: release-files/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

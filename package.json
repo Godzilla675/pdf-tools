@@ -12,6 +12,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "dist:mac": "vite build && electron-builder --mac dmg zip --publish never",
+    "dist:win": "vite build && electron-builder --win --publish never",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },
@@ -84,6 +85,27 @@
     },
     "dmg": {
       "sign": false
+    },
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     }
   }
 }
