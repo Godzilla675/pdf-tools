@@ -11,6 +11,7 @@ function createWindow() {
     minHeight: 700,
     backgroundColor: '#09090b',
     titleBarStyle: isMac ? 'hiddenInset' : 'default',
+    icon: path.join(__dirname, '../assets/icon.png'),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
