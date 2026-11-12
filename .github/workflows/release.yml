@@ -39,7 +39,7 @@ jobs:
       - name: Upload macOS Artifacts to Workflow Run
         uses: actions/upload-artifact@v4
         with:
-          name: Mono-PDF-macOS-Installers
+          name: pdf-tools-macOS-Installers
           path: |
             release/*.dmg
             release/*.zip
@@ -71,7 +71,7 @@ jobs:
       - name: Upload Windows Artifacts to Workflow Run
         uses: actions/upload-artifact@v4
         with:
-          name: Mono-PDF-Windows-Installers
+          name: pdf-tools-Windows-Installers
           path: |
             release/*.exe
 
@@ -98,22 +98,21 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.0
-          name: "Mono PDF v1.0.0 (Desktop Offline Edition)"
+          name: "pdf tools v1.0.0 (Desktop Offline Edition)"
           body: |
-            ## Mono PDF Desktop (100% Offline)
+            ## pdf tools Desktop (100% Offline)
             Download the installer for your operating system below:
 
             ### macOS
-            - **Apple Silicon (M1 / M2 / M3 / M4 / M5):** `Mono PDF-1.0.0-arm64.dmg`
-            - **Intel Mac:** `Mono PDF-1.0.0.dmg`
-            - **ZIP Package:** `Mono.PDF-1.0.0-arm64-mac.zip`
+            - **Apple Silicon (M1 / M2 / M3 / M4 / M5):** `pdf.tools-1.0.0-arm64.dmg`
+            - **ZIP Package:** `pdf.tools-1.0.0-arm64-mac.zip`
 
-            > **Note on first launch for macOS (Unsigned App):** If macOS says the app is unverified, right-click `Mono PDF.app` -> click **Open**, or run:
-            > `xattr -cr "/Applications/Mono PDF.app"` in Terminal.
+            > **Note on first launch for macOS (Unsigned App):** If macOS says the app is unverified, right-click `pdf tools.app` -> click **Open**, or run:
+            > `xattr -cr "/Applications/pdf tools.app"` in Terminal.
 
             ### Windows
-            - **Installer (.exe):** `Mono PDF Setup 1.0.0.exe` (NSIS installer with Desktop and Start Menu shortcuts)
-            - **Portable (.exe):** `Mono PDF 1.0.0.exe` (Standalone single file executable, no installation needed)
+            - **Installer (.exe):** `pdf.tools.Setup.1.0.0.exe` (NSIS installer with Desktop and Start Menu shortcuts)
+            - **Portable (.exe):** `pdf.tools.1.0.0.exe` (Standalone single file executable, no installation needed)
 
             > **Note on first launch for Windows (SmartScreen):** If Windows SmartScreen appears, click **More info** -> **Run anyway**.
           draft: false

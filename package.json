@@ -1,8 +1,8 @@
 {
-  "name": "mono-pdf",
-  "productName": "Mono PDF",
+  "name": "pdf-tools",
+  "productName": "pdf tools",
   "version": "1.0.0",
-  "description": "Offline Monochrome PDF Suite for macOS",
+  "description": "Offline PDF Tools Suite for macOS and Windows",
   "main": "electron/main.cjs",
   "private": true,
   "type": "module",
@@ -52,8 +52,8 @@
     "typescript": "^7.0.2"
   },
   "build": {
-    "appId": "com.monopdf.desktop",
-    "productName": "Mono PDF",
+    "appId": "com.pdftools.desktop",
+    "productName": "pdf tools",
     "directories": {
       "output": "release"
     },
