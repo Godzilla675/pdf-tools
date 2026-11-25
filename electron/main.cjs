@@ -22,14 +22,38 @@ function createWindow() {
 
   if (isSmokeTest) {
     const timer = setTimeout(() => {
-      console.error('[smoke-test] Timed out waiting for window to load');
+      console.error('[smoke-test] Timed out waiting for React UI to mount');
       app.exit(1);
     }, 30000);
 
-    mainWindow.webContents.once('did-finish-load', () => {
-      clearTimeout(timer);
-      console.log('[smoke-test] Window loaded successfully');
-      app.exit(0);
+    mainWindow.webContents.once('did-finish-load', async () => {
+      try {
+        const deadline = Date.now() + 10000;
+        let rootText = '';
+        while (Date.now() < deadline) {
+          rootText = await mainWindow.webContents.executeJavaScript(
+            "document.getElementById('root')?.innerText?.trim() || ''",
+            true
+          );
+          if (rootText.length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+
+        if (!rootText) {
+          clearTimeout(timer);
+          console.error('[smoke-test] #root remained empty after load');
+          app.exit(1);
+          return;
+        }
+
+        clearTimeout(timer);
+        console.log(`[smoke-test] Window loaded and React UI mounted (${rootText.length} chars)`);
+        app.exit(0);
+      } catch (err) {
+        clearTimeout(timer);
+        console.error('[smoke-test] Error verifying rendered DOM:', err);
+        app.exit(1);
+      }
     });
 
     mainWindow.webContents.once('did-fail-load', (_event, errorCode, errorDescription) => {

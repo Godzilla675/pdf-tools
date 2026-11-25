@@ -1,7 +1,7 @@
 {
   "name": "pdf-tools",
   "productName": "pdf tools",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Offline PDF Tools Suite for macOS and Windows",
   "main": "electron/main.cjs",
   "private": true,
@@ -15,7 +15,8 @@
     "dist:mac": "vite build && electron-builder --mac --publish never",
     "dist:win": "vite build && electron-builder --win --publish never",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx --test src/utils/pdfHelpers.test.ts"
   },
   "dependencies": {
     "@google/genai": "^3.1.0",

@@ -32,8 +32,10 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
-      - name: Type-check application
-        run: npm run lint
+      - name: Type-check and run unit tests
+        run: |
+          npm run lint
+          npm test
 
       - name: Build Frontend and Package macOS Installers (arm64 & x64)
         env:
@@ -121,14 +123,47 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
+      - name: Type-check and run unit tests
+        run: |
+          npm run lint
+          npm test
+
       - name: Build Frontend and Package Windows EXE
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: npm run dist:win
 
-      - name: List generated release files
-        shell: bash
-        run: ls -lh release/
+      - name: Verify Windows Executables and Live Launch Smoke Test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-ChildItem release\ | Format-Table Name, Length
+
+          $exes = Get-ChildItem release\*.exe
+          if ($exes.Count -lt 2) {
+            throw "Expected both NSIS Setup and Portable .exe files in release/, found $($exes.Count)"
+          }
+
+          foreach ($exe in $exes) {
+            $bytes = [System.IO.File]::ReadAllBytes($exe.FullName)
+            if ($bytes.Length -lt 1048576 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+              throw "Invalid PE executable: $($exe.Name)"
+            }
+            Write-Host "Verified PE executable: $($exe.Name) ($($exe.Length) bytes)"
+          }
+
+          $unpackedExe = Resolve-Path "release\win-unpacked\pdf tools.exe"
+          Write-Host "=== Running live Windows launch smoke test on $unpackedExe ==="
+          $env:PDF_TOOLS_SMOKE_TEST = "1"
+          $proc = Start-Process -FilePath $unpackedExe -ArgumentList "--no-sandbox", "--disable-gpu" -PassThru -NoNewWindow
+          if (-not $proc.WaitForExit(45000)) {
+            $proc.Kill()
+            throw "Windows Electron smoke test timed out after 45s"
+          }
+          if ($proc.ExitCode -ne 0) {
+            throw "Windows Electron smoke test failed with exit code $($proc.ExitCode)"
+          }
+          Write-Host "Windows Electron smoke test passed!"
 
       - name: Upload Windows Artifacts to Workflow Run
         uses: actions/upload-artifact@v4
@@ -184,10 +219,11 @@ jobs:
           body: |
             ## pdf tools Desktop ${{ steps.version.outputs.tag }} (100% Offline)
 
-            ### What's Fixed in ${{ steps.version.outputs.tag }}
-            - **Fixed Apple Silicon (M1 / M2 / M3 / M4 / M5) "app is damaged and can't be opened" error:** macOS app bundles are now properly ad-hoc code signed with bound `Info.plist` and sealed resources and verified with `codesign --verify --deep --strict` plus a live Apple Silicon launch test in CI.
-            - **Added both Apple Silicon (`arm64`) and Intel (`x64`) macOS builds.**
-            - **Fixed macOS window title bar overlap** so traffic-light buttons no longer sit on top of the navigation bar.
+            ### What's New in ${{ steps.version.outputs.tag }}
+            - **Upgraded AI Engine & Status Detection:** Updated Gemini model support, added `/api/ai/status` detection, and improved Offline Extractive & Local Ollama desktop handling.
+            - **Enhanced Document Rendering:** Added `html2canvas-pro` and `marked` for high-fidelity HTML/Markdown-to-PDF and PowerPoint (`.pptx`) slide-to-PDF rendering & previews.
+            - **Expanded File Compatibility & Previews:** Added image and `.pptx` thumbnail rendering plus tool/file compatibility checks across the desktop workspace.
+            - **Verified on macOS (Apple Silicon & Intel) and Windows:** Automated CI type-checking, unit tests, strict `codesign --verify --deep --strict` checks, and live Electron launch + UI mount smoke tests on both macOS Apple Silicon and Windows.
 
             ---
 
