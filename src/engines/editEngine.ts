@@ -157,7 +157,7 @@ export async function executeWatermarkPdf(
   const rotation = Number(params.rotation ?? -35);
   const fontSize = Math.max(12, Number(params.fontSize ?? 44));
   const gray = Math.max(0, Math.min(0.95, Number(params.grayShade ?? 0.35)));
-  const text = String(params.text || 'CONFIDENTIAL // MONO');
+  const text = String(params.text || 'CONFIDENTIAL');
   const isMosaic = params.placement === 'mosaic';
   const isUnder = params.layerOrder === 'under';
 
@@ -219,9 +219,16 @@ export async function executeWatermarkPdf(
         }
       }
     } else {
+      const rad = (rotation * Math.PI) / 180;
+      const cx = width / 2;
+      const cy = height / 2;
+      const halfW = textW / 2;
+      const halfH = fontSize / 3;
+      const x = cx - halfW * Math.cos(rad) + halfH * Math.sin(rad);
+      const y = cy - halfW * Math.sin(rad) - halfH * Math.cos(rad);
       page.drawText(text, {
-        x: Math.max(24, (width - textW * 0.75) / 2),
-        y: height / 2,
+        x,
+        y,
         size: fontSize,
         font: fontBold,
         color: rgb(gray, gray, gray),
@@ -338,23 +345,31 @@ export async function executeEditPdfStudio(
 
     if (ann.type === 'text' || ann.type === 'comment') {
       const fSize = ann.fontSize || 14;
+      const activeFont = ann.fontWeight === 'bold' ? fontBold : fontRegular;
+      const rawText = (ann.text || 'Note').replace(/[^\x20-\x7E\xA0-\xFF\n]/g, ' ');
+      const lines = rawText.split('\n');
+      const pad = ann.type === 'comment' ? 6 : 2;
+      const effectiveH = Math.max(boxH, lines.length * fSize * 1.35 + pad * 2);
+      const drawY = height - ann.y * height - effectiveH;
       if (ann.type === 'comment') {
         page.drawRectangle({
           x: pdfX,
-          y: pdfY,
+          y: drawY,
           width: Math.max(120, boxW),
-          height: Math.max(36, boxH),
+          height: Math.max(36, effectiveH),
           color: rgb(0.95, 0.95, 0.96),
           borderColor: rgb(0.15, 0.15, 0.18),
           borderWidth: 1,
         });
       }
-      page.drawText((ann.text || 'Note').replace(/[^\x20-\x7E]/g, ' '), {
-        x: pdfX + (ann.type === 'comment' ? 6 : 0),
-        y: pdfY + Math.max(4, boxH - fSize - 2),
-        size: fSize,
-        font: ann.fontWeight === 'bold' ? fontBold : fontRegular,
-        color: rgb(0.06, 0.06, 0.08),
+      lines.forEach((lineStr, lineIdx) => {
+        page.drawText(lineStr, {
+          x: pdfX + pad,
+          y: drawY + effectiveH - pad - fSize - lineIdx * fSize * 1.3,
+          size: fSize,
+          font: activeFont,
+          color: rgb(0.06, 0.06, 0.08),
+        });
       });
     } else if (ann.type === 'rect') {
       page.drawRectangle({
@@ -371,13 +386,15 @@ export async function executeEditPdfStudio(
         y: pdfY,
         width: boxW,
         height: boxH,
-        color: rgb(0.82, 0.82, 0.85),
-        opacity: 0.4,
+        color: rgb(0.98, 0.88, 0.35),
+        opacity: 0.42,
       });
     } else if (ann.type === 'line') {
+      const startPt = ann.points?.[0] || { x: ann.x, y: ann.y };
+      const endPt = ann.points?.[1] || { x: ann.x + ann.width, y: ann.y + ann.height };
       page.drawLine({
-        start: { x: pdfX, y: pdfY + boxH },
-        end: { x: pdfX + boxW, y: pdfY },
+        start: { x: startPt.x * width, y: height - startPt.y * height },
+        end: { x: endPt.x * width, y: height - endPt.y * height },
         thickness: 2,
         color: rgb(0.08, 0.08, 0.1),
       });

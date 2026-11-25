@@ -10,23 +10,39 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const DEFAULT_GEMINI_MODEL = 'gemini-4-hydrogen';
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
   app.use(express.json({ limit: '50mb' }));
 
+  app.get('/api/ai/status', (_req, res) => {
+    res.json({
+      configured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()),
+      model: DEFAULT_GEMINI_MODEL,
+    });
+  });
+
   app.post('/api/ai', async (req, res) => {
     try {
-      const { prompt, systemInstruction } = req.body;
-      if (!process.env.GEMINI_API_KEY) {
+      const { prompt, systemInstruction } = req.body || {};
+      const apiKey = process.env.GEMINI_API_KEY?.trim();
+      if (!apiKey) {
         return res.status(503).json({
-          error: 'GEMINI_API_KEY is not configured in Settings > Secrets. Using offline engine fallback.'
+          code: 'API_KEY_MISSING',
+          error:
+            'Cloud AI is not configured yet. Set GEMINI_API_KEY in Settings > Secrets, or switch AI Engine Mode to Local Ollama or Offline Extractive.',
         });
       }
 
+      if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+        return res.status(400).json({ error: 'Prompt text is required.' });
+      }
+
       const ai = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY,
+        apiKey,
         httpOptions: {
           headers: {
             'User-Agent': 'aistudio-build',
@@ -35,16 +51,28 @@ async function startServer() {
       });
 
       const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: String(prompt || ''),
+        model: DEFAULT_GEMINI_MODEL,
+        contents: prompt,
         config: systemInstruction
           ? { systemInstruction: String(systemInstruction) }
           : undefined,
       });
 
-      res.json({ text: response.text || '' });
+      res.json({ text: response.text || '', model: DEFAULT_GEMINI_MODEL });
     } catch (err: any) {
-      res.status(500).json({ error: err?.message || 'Cloud AI generation failed' });
+      const status = Number(err?.status || err?.code) || 500;
+      const msg = err?.message || 'Cloud AI generation failed.';
+      if (status === 403 || status === 400 || msg.includes('API_KEY_INVALID')) {
+        return res.status(status === 403 ? 403 : 400).json({
+          error: `Gemini API key rejected (${msg}). Please verify GEMINI_API_KEY in Settings > Secrets.`,
+        });
+      }
+      if (status === 429 || msg.includes('RESOURCE_EXHAUSTED')) {
+        return res.status(429).json({
+          error: 'Gemini API quota exceeded. Check your billing/quota in Settings > Secrets or retry shortly.',
+        });
+      }
+      res.status(500).json({ error: msg });
     }
   });
 
@@ -63,7 +91,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`MONO PDF Server listening on http://localhost:${PORT}`);
+    console.log(`pdf tools server listening on http://localhost:${PORT}`);
   });
 }
 

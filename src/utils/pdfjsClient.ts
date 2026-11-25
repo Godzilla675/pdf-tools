@@ -3,10 +3,13 @@ import * as pdfjsLib from 'pdfjs-dist';
 import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PositionedTextItem } from './pdfHelpers';
 
-// Configure local worker with automatic offline fallback
+// Configure local worker with automatic offline fallback (works on http:// and Electron file:// with base: './')
 try {
   if (typeof window !== 'undefined' && pdfjsLib.GlobalWorkerOptions) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+      pdfjsWorker,
+      window.location.href
+    ).href;
   }
 } catch {
   // Fallback handled automatically by pdfjs-dist fake worker in non-browser or restricted environments

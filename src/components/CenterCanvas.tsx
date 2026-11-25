@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Upload,
   RotateCw,
@@ -30,6 +30,8 @@ import {
   WorkflowStep,
 } from '../types/pdf';
 import { formatBytes } from '../utils/pdfHelpers';
+import { buildPrintableHtmlDocument, detectMarkupFormat } from '../utils/htmlPdfRenderer';
+import { extractPositionedTextFromPdf } from '../utils/pdfjsClient';
 import { InteractivePageStudio } from './InteractivePageStudio';
 import { applyScannerMonochromeFilter } from '../engines/organizeEngine';
 import { ToolIcon } from './ToolIcon';
@@ -83,6 +85,14 @@ const STUDIO_TOOLS: ToolId[] = [
   'redact-pdf',
 ];
 
+const PAGE_MUTATION_TOOLS: ToolId[] = ['organize-pdf', 'merge-pdf', 'rotate-pdf'];
+const PAGE_SELECTION_TOOLS: ToolId[] = [
+  'organize-pdf',
+  'merge-pdf',
+  'remove-pages',
+  'extract-pages',
+];
+
 export const CenterCanvas: React.FC<CenterCanvasProps> = ({
   tool,
   files,
@@ -129,8 +139,66 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
   const [cameraError, setCameraError] = useState('');
   const [thumbScale, setThumbScale] = useState<number>(1);
   const [readerSearchQuery, setReaderSearchQuery] = useState('');
+  const [readerPageTexts, setReaderPageTexts] = useState<string[]>([]);
   const [newWorkflowName, setNewWorkflowName] = useState('');
   const [copiedText, setCopiedText] = useState(false);
+
+  // Extract searchable text per page when Built-in PDF Reader is active
+  useEffect(() => {
+    let cancelled = false;
+    if (tool.id !== 'pdf-reader' || !files[0]) {
+      setReaderPageTexts([]);
+      return;
+    }
+    extractPositionedTextFromPdf(files[0].bytes)
+      .then(({ pageTexts }) => {
+        if (!cancelled) setReaderPageTexts(pageTexts);
+      })
+      .catch(() => {
+        if (!cancelled) setReaderPageTexts([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tool.id, files]);
+
+  // Compute matching pages & snippets for Built-in PDF Reader search
+  const readerSearchMatches = useMemo(() => {
+    const q = readerSearchQuery.trim().toLowerCase();
+    if (!q || readerPageTexts.length === 0) return [];
+    const results: { pageIndex: number; count: number; snippet: string }[] = [];
+    readerPageTexts.forEach((text, pageIndex) => {
+      const lower = text.toLowerCase();
+      let idx = lower.indexOf(q);
+      if (idx === -1) return;
+      let count = 0;
+      const firstIdx = idx;
+      while (idx !== -1) {
+        count++;
+        idx = lower.indexOf(q, idx + q.length);
+      }
+      const start = Math.max(0, firstIdx - 48);
+      const end = Math.min(text.length, firstIdx + q.length + 72);
+      const snippet =
+        (start > 0 ? '...' : '') +
+        text.slice(start, end).replace(/\s+/g, ' ').trim() +
+        (end < text.length ? '...' : '');
+      results.push({ pageIndex, count, snippet });
+    });
+    return results;
+  }, [readerSearchQuery, readerPageTexts]);
+
+  // Build real styled HTML preview srcDoc for HTML / Markdown to PDF (Tool 14)
+  const htmlPreviewSrcDoc = useMemo(() => {
+    if (tool.id !== 'html-to-pdf') return '';
+    const raw = String(params.rawContent || '');
+    if (!raw.trim()) return '';
+    const fmt =
+      params.sourceFormat === 'html' || params.sourceFormat === 'markdown'
+        ? params.sourceFormat
+        : detectMarkupFormat(raw, files[0]?.name);
+    return buildPrintableHtmlDocument(raw, fmt, Number(params.fontSize || 11));
+  }, [tool.id, params.rawContent, params.sourceFormat, params.pageSize, params.fontSize, files]);
 
   const startWebcam = async () => {
     setCameraError('');
@@ -181,6 +249,9 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
     tool.id !== 'html-to-pdf' &&
     tool.id !== 'scan-to-pdf' &&
     tool.id !== 'custom-workflows';
+
+  const canMutatePages = PAGE_MUTATION_TOOLS.includes(tool.id);
+  const canSelectPages = PAGE_SELECTION_TOOLS.includes(tool.id);
 
   return (
     <main className="flex-1 min-h-[calc(100vh-4rem)] flex flex-col bg-[#f8f9fa] dark:bg-[#0d1117] overflow-y-auto">
@@ -278,69 +349,79 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
       ) : (
         /* STAGE 2: Active Workspace Canvas */
         <div className="flex-1 p-6 space-y-6 max-w-6xl w-full mx-auto">
-          {/* SPECIAL VIEW 1: HTML / MARKDOWN TO PDF LIVE SPLIT EDITOR (Tool 14) */}
+          {/* SPECIAL VIEW 1: HTML / MARKDOWN TO PDF REAL RENDERED PREVIEW & EDITOR (Tool 14) */}
           {tool.id === 'html-to-pdf' && (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 h-[calc(100vh-200px)] min-h-[460px]">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 h-[calc(100vh-200px)] min-h-[500px]">
               <div className="flex flex-col rounded-2xl border border-[#dadce0] dark:border-zinc-800 bg-white dark:bg-[#161b22] overflow-hidden">
-                <div className="px-4 py-2.5 border-b border-[#dadce0] dark:border-zinc-800 flex items-center justify-between text-xs font-mono text-[#5f6368]">
-                  <span>SOURCE MARKUP ({(params.sourceFormat || 'markdown').toUpperCase()})</span>
-                  <span>{(params.rawContent || '').length} chars</span>
+                <div className="px-4 py-2.5 border-b border-[#dadce0] dark:border-zinc-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => onChangeParam('sourceFormat', 'html')}
+                      className={`px-2.5 py-1 rounded-full font-mono text-[11px] font-semibold cursor-pointer ${
+                        (params.sourceFormat || 'html') === 'html'
+                          ? 'bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950'
+                          : 'bg-[#f1f3f4] dark:bg-zinc-800 text-[#5f6368]'
+                      }`}
+                    >
+                      HTML + CSS
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onChangeParam('sourceFormat', 'markdown')}
+                      className={`px-2.5 py-1 rounded-full font-mono text-[11px] font-semibold cursor-pointer ${
+                        params.sourceFormat === 'markdown'
+                          ? 'bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950'
+                          : 'bg-[#f1f3f4] dark:bg-zinc-800 text-[#5f6368]'
+                      }`}
+                    >
+                      Markdown
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2 font-mono text-[11px] text-[#5f6368]">
+                    <span>{(params.rawContent || '').length} chars</span>
+                    {params.rawContent && (
+                      <button
+                        type="button"
+                        onClick={() => onChangeParam('rawContent', '')}
+                        className="px-2 py-0.5 rounded-full border border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800 cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <textarea
                   aria-label="HTML or Markdown Source Markup"
                   value={params.rawContent || ''}
                   onChange={(e) => onChangeParam('rawContent', e.target.value)}
                   className="flex-1 p-4 font-mono text-xs bg-transparent text-[#202124] dark:text-zinc-100 focus:outline-none resize-none leading-relaxed"
-                  placeholder="Type or paste Markdown or HTML here, or upload an .html/.md file..."
+                  placeholder="Paste full HTML (with <style> CSS, tables, badges, layouts) or Markdown here — or click 'Select File' above to load an .html / .md file..."
                 />
               </div>
+
               <div className="flex flex-col rounded-2xl border border-[#dadce0] dark:border-zinc-800 bg-white dark:bg-[#161b22] overflow-hidden">
                 <div className="px-4 py-2.5 border-b border-[#dadce0] dark:border-zinc-800 flex items-center justify-between text-xs font-mono text-[#5f6368]">
-                  <span>LIVE PAGINATED VECTOR PREVIEW</span>
-                  <span>A4 PORTRAIT</span>
+                  <span>LIVE RENDERED PDF PREVIEW</span>
+                  <span>{(params.pageSize || 'A4').toUpperCase()} PORTRAIT</span>
                 </div>
-                <div className="flex-1 p-6 overflow-y-auto space-y-3 text-[#202124] dark:text-zinc-100">
-                  {(params.rawContent || '').split('\n').map((line: string, i: number) => {
-                    const t = line.trim();
-                    if (!t) return <div key={i} className="h-2" />;
-                    if (t.startsWith('# '))
-                      return (
-                        <h2
-                          key={i}
-                          className="text-xl font-bold border-b border-[#dadce0] dark:border-zinc-800 pb-1"
-                        >
-                          {t.slice(2)}
-                        </h2>
-                      );
-                    if (t.startsWith('## '))
-                      return (
-                        <h3 key={i} className="text-base font-bold pt-2">
-                          {t.slice(3)}
-                        </h3>
-                      );
-                    if (t.startsWith('- '))
-                      return (
-                        <div key={i} className="text-xs pl-3 flex items-start gap-2">
-                          <span>•</span>
-                          <span>{t.slice(2)}</span>
-                        </div>
-                      );
-                    if (t.startsWith('|'))
-                      return (
-                        <div
-                          key={i}
-                          className="font-mono text-xs bg-[#f1f3f4] dark:bg-zinc-900 px-2 py-1 rounded"
-                        >
-                          {t}
-                        </div>
-                      );
-                    return (
-                      <p key={i} className="text-xs leading-relaxed text-[#5f6368] dark:text-zinc-300">
-                        {t}
-                      </p>
-                    );
-                  })}
-                </div>
+                {htmlPreviewSrcDoc ? (
+                  <iframe
+                    title="Live Rendered HTML PDF Preview"
+                    sandbox="allow-same-origin"
+                    srcDoc={htmlPreviewSrcDoc}
+                    className="flex-1 w-full bg-white border-0"
+                  />
+                ) : (
+                  <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-xs text-[#5f6368] space-y-2 bg-[#f8f9fa] dark:bg-zinc-950">
+                    <p className="font-semibold text-[#202124] dark:text-zinc-200">
+                      Live preview renders here
+                    </p>
+                    <p className="max-w-xs leading-relaxed">
+                      Paste HTML + CSS or Markdown on the left, or upload an .html / .md file. The exported PDF will render the styled layout—not raw source code.
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -360,7 +441,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                     <button
                       type="button"
                       onClick={startWebcam}
-                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950"
+                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950 cursor-pointer"
                     >
                       <Camera className="w-3.5 h-3.5" />
                       <span>Start Camera</span>
@@ -370,7 +451,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                       <button
                         type="button"
                         onClick={captureWebcamFrame}
-                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950"
+                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950 cursor-pointer"
                       >
                         <Camera className="w-3.5 h-3.5" />
                         <span>Capture Scan Page</span>
@@ -378,7 +459,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                       <button
                         type="button"
                         onClick={stopWebcam}
-                        className="px-3.5 py-1.5 text-xs rounded-full border border-[#dadce0] dark:border-zinc-700"
+                        className="px-3.5 py-1.5 text-xs rounded-full border border-[#dadce0] dark:border-zinc-700 cursor-pointer"
                       >
                         Stop Camera
                       </button>
@@ -387,7 +468,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
-                    className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full border border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800"
+                    className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full border border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800 cursor-pointer"
                   >
                     <Upload className="w-3.5 h-3.5" />
                     <span>Upload Photos</span>
@@ -396,7 +477,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                     <button
                       type="button"
                       onClick={onClearCapturedScans}
-                      className="px-3 py-1.5 text-xs font-mono text-[#5f6368] rounded-full border border-[#dadce0] dark:border-zinc-700"
+                      className="px-3 py-1.5 text-xs font-mono text-[#5f6368] rounded-full border border-[#dadce0] dark:border-zinc-700 cursor-pointer"
                     >
                       Clear ({capturedScans.length})
                     </button>
@@ -455,7 +536,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                     <button
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
-                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full border border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800"
+                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full border border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800 cursor-pointer"
                     >
                       <Upload className="w-3.5 h-3.5" />
                       <span>Select Input PDF</span>
@@ -463,7 +544,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                     <button
                       type="button"
                       onClick={onExecuteTool}
-                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950"
+                      className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950 cursor-pointer"
                     >
                       <Play className="w-3.5 h-3.5" />
                       <span>Run Pipeline ({workflowSteps.length} Steps)</span>
@@ -477,7 +558,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                       key={step.id}
                       className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-xl bg-[#f8f9fa] dark:bg-zinc-900 border border-[#dadce0] dark:border-zinc-800"
                     >
-                      <div className="flex items-center gap-3">
+                      <div className="flex flex-wrap items-center gap-3">
                         <span className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-mono font-bold bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950">
                           {idx + 1}
                         </span>
@@ -488,7 +569,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                           onChange={(e) => {
                             const newToolId = e.target.value as ToolId;
                             onChangeWorkflowSteps((prev) =>
-                              prev.map((s, i) => (i === idx ? { ...s, toolId: newToolId } : s))
+                              prev.map((s, i) => (i === idx ? { ...s, toolId: newToolId, params: {} } : s))
                             );
                           }}
                           className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-white dark:bg-zinc-950 border border-[#dadce0] dark:border-zinc-800"
@@ -526,7 +607,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                         {step.toolId === 'watermark-pdf' && (
                           <input
                             type="text"
-                            value={step.params.text || 'CONFIDENTIAL'}
+                            value={step.params.text ?? 'CONFIDENTIAL'}
                             onChange={(e) =>
                               onChangeWorkflowSteps((prev) =>
                                 prev.map((s, i) =>
@@ -538,6 +619,83 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                             }
                             placeholder="Watermark text"
                             className="px-2.5 py-1.5 text-xs font-mono rounded-lg bg-white dark:bg-zinc-950 border border-[#dadce0] dark:border-zinc-800"
+                          />
+                        )}
+
+                        {step.toolId === 'page-numbers' && (
+                          <select
+                            value={step.params.position || 'bottom-right'}
+                            onChange={(e) =>
+                              onChangeWorkflowSteps((prev) =>
+                                prev.map((s, i) =>
+                                  i === idx
+                                    ? { ...s, params: { ...s.params, position: e.target.value } }
+                                    : s
+                                )
+                              )
+                            }
+                            className="px-2.5 py-1.5 text-xs font-mono rounded-lg bg-white dark:bg-zinc-950 border border-[#dadce0] dark:border-zinc-800"
+                          >
+                            <option value="bottom-right">Bottom Right</option>
+                            <option value="bottom-center">Bottom Center</option>
+                            <option value="top-right">Top Right</option>
+                          </select>
+                        )}
+
+                        {step.toolId === 'crop-pdf' && (
+                          <input
+                            type="number"
+                            min={0}
+                            max={200}
+                            value={step.params.top ?? 36}
+                            onChange={(e) => {
+                              const m = Number(e.target.value);
+                              onChangeWorkflowSteps((prev) =>
+                                prev.map((s, i) =>
+                                  i === idx
+                                    ? { ...s, params: { ...s.params, top: m, bottom: m, left: m, right: m } }
+                                    : s
+                                )
+                              );
+                            }}
+                            placeholder="Margin pt"
+                            className="w-24 px-2.5 py-1.5 text-xs font-mono rounded-lg bg-white dark:bg-zinc-950 border border-[#dadce0] dark:border-zinc-800"
+                          />
+                        )}
+
+                        {step.toolId === 'remove-pages' && (
+                          <input
+                            type="text"
+                            value={step.params.removeRanges || '2'}
+                            onChange={(e) =>
+                              onChangeWorkflowSteps((prev) =>
+                                prev.map((s, i) =>
+                                  i === idx
+                                    ? { ...s, params: { ...s.params, removeRanges: e.target.value } }
+                                    : s
+                                )
+                              )
+                            }
+                            placeholder="e.g. 2, 4-5"
+                            className="w-28 px-2.5 py-1.5 text-xs font-mono rounded-lg bg-white dark:bg-zinc-950 border border-[#dadce0] dark:border-zinc-800"
+                          />
+                        )}
+
+                        {step.toolId === 'protect-pdf' && (
+                          <input
+                            type="password"
+                            value={step.params.password || ''}
+                            onChange={(e) =>
+                              onChangeWorkflowSteps((prev) =>
+                                prev.map((s, i) =>
+                                  i === idx
+                                    ? { ...s, params: { ...s.params, password: e.target.value } }
+                                    : s
+                                )
+                              )
+                            }
+                            placeholder="Password..."
+                            className="w-36 px-2.5 py-1.5 text-xs font-mono rounded-lg bg-white dark:bg-zinc-950 border border-[#dadce0] dark:border-zinc-800"
                           />
                         )}
 
@@ -568,7 +726,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                           onChangeWorkflowSteps((prev) => prev.filter((_, i) => i !== idx))
                         }
                         aria-label={`Remove Step ${idx + 1}`}
-                        className="p-1.5 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100"
+                        className="p-1.5 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 cursor-pointer"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -587,7 +745,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                         },
                       ])
                     }
-                    className="w-full py-3 rounded-xl border border-dashed border-[#dadce0] dark:border-zinc-700 text-xs font-semibold text-[#5f6368] dark:text-zinc-400 hover:border-[#202124] flex items-center justify-center gap-1.5"
+                    className="w-full py-3 rounded-xl border border-dashed border-[#dadce0] dark:border-zinc-700 text-xs font-semibold text-[#5f6368] dark:text-zinc-400 hover:border-[#202124] flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <Plus className="w-4 h-4" />
                     <span>Add Pipeline Step</span>
@@ -614,7 +772,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                         );
                         setNewWorkflowName('');
                       }}
-                      className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-full border border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800"
+                      className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-full border border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800 cursor-pointer"
                     >
                       <Bookmark className="w-3.5 h-3.5" />
                       <span>Save Macro</span>
@@ -631,7 +789,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                           <button
                             type="button"
                             onClick={() => onLoadWorkflow(wf)}
-                            className="px-3 py-1 font-medium hover:underline"
+                            className="px-3 py-1 font-medium hover:underline cursor-pointer"
                           >
                             {wf.name} ({wf.steps.length})
                           </button>
@@ -639,7 +797,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                             type="button"
                             onClick={() => onDeleteSavedWorkflow(wf.id)}
                             aria-label={`Delete workflow ${wf.name}`}
-                            className="px-2 py-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100"
+                            className="px-2 py-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 cursor-pointer"
                           >
                             ×
                           </button>
@@ -666,7 +824,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                       <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
-                        className="px-3 py-1 text-xs font-semibold rounded-full bg-[#f1f3f4] dark:bg-zinc-800 hover:bg-[#e8eaed] dark:hover:bg-zinc-700"
+                        className="px-3 py-1 text-xs font-semibold rounded-full bg-[#f1f3f4] dark:bg-zinc-800 hover:bg-[#e8eaed] dark:hover:bg-zinc-700 cursor-pointer"
                       >
                         + Add More Files
                       </button>
@@ -674,7 +832,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                     <button
                       type="button"
                       onClick={onClearWorkspace}
-                      className="px-3 py-1 text-xs font-mono text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 rounded-full border border-[#dadce0] dark:border-zinc-800"
+                      className="px-3 py-1 text-xs font-mono text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 rounded-full border border-[#dadce0] dark:border-zinc-800 cursor-pointer"
                     >
                       Clear All
                     </button>
@@ -689,7 +847,11 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
                         <span className="font-mono text-[#5f6368] tabular-nums">
-                          {String(idx + 1).padStart(2, '0')}
+                          {tool.id === 'compare-pdf'
+                            ? idx === 0
+                              ? 'DOC A'
+                              : 'DOC B'
+                            : String(idx + 1).padStart(2, '0')}
                         </span>
                         <span className="font-semibold truncate text-[#202124] dark:text-zinc-100">
                           {file.name}
@@ -706,7 +868,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                               disabled={idx === 0}
                               onClick={() => onMoveFile(idx, idx - 1)}
                               aria-label={`Move ${file.name} up`}
-                              className="p-1 rounded border border-[#dadce0] dark:border-zinc-800 disabled:opacity-30"
+                              className="p-1 rounded border border-[#dadce0] dark:border-zinc-800 disabled:opacity-30 cursor-pointer"
                             >
                               <ArrowLeft className="w-3 h-3" />
                             </button>
@@ -715,7 +877,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                               disabled={idx === files.length - 1}
                               onClick={() => onMoveFile(idx, idx + 1)}
                               aria-label={`Move ${file.name} down`}
-                              className="p-1 rounded border border-[#dadce0] dark:border-zinc-800 disabled:opacity-30"
+                              className="p-1 rounded border border-[#dadce0] dark:border-zinc-800 disabled:opacity-30 cursor-pointer"
                             >
                               <ArrowRight className="w-3 h-3" />
                             </button>
@@ -725,7 +887,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                           type="button"
                           onClick={() => onRemoveFile(file.id)}
                           aria-label={`Remove ${file.name}`}
-                          className="p-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100"
+                          className="p-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 cursor-pointer"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -733,9 +895,25 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                     </div>
                   ))}
                 </div>
+
+                {/* Compare PDF requires 2 documents */}
+                {tool.id === 'compare-pdf' && files.length < 2 && (
+                  <div className="pt-2 border-t border-[#f1f3f4] dark:border-zinc-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span className="text-[#5f6368]">
+                      Upload a second PDF (Document B) to compare against <strong>{files[0].name}</strong>.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="px-3.5 py-1.5 rounded-full bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950 font-semibold cursor-pointer"
+                    >
+                      + Select Document B
+                    </button>
+                  </div>
+                )}
               </div>
 
-              {/* BUILT-IN PDF READER VIEW */}
+              {/* BUILT-IN PDF READER VIEW WITH LIVE TEXT SEARCH */}
               {tool.id === 'pdf-reader' && thumbnails.length > 0 && (
                 <div className="space-y-4">
                   <div className="p-3.5 bg-white dark:bg-[#161b22] rounded-2xl border border-[#dadce0] dark:border-zinc-800 flex flex-wrap items-center justify-between gap-4">
@@ -744,7 +922,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                         type="button"
                         disabled={activePageIndex <= 0}
                         onClick={() => onChangeActivePage(Math.max(0, activePageIndex - 1))}
-                        className="px-3 py-1 text-xs rounded-full border border-[#dadce0] dark:border-zinc-700 disabled:opacity-40"
+                        className="px-3 py-1 text-xs rounded-full border border-[#dadce0] dark:border-zinc-700 disabled:opacity-40 cursor-pointer"
                       >
                         Prev Page
                       </button>
@@ -757,7 +935,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                         onClick={() =>
                           onChangeActivePage(Math.min(thumbnails.length - 1, activePageIndex + 1))
                         }
-                        className="px-3 py-1 text-xs rounded-full border border-[#dadce0] dark:border-zinc-700 disabled:opacity-40"
+                        className="px-3 py-1 text-xs rounded-full border border-[#dadce0] dark:border-zinc-700 disabled:opacity-40 cursor-pointer"
                       >
                         Next Page
                       </button>
@@ -770,15 +948,15 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                           type="text"
                           value={readerSearchQuery}
                           onChange={(e) => setReaderSearchQuery(e.target.value)}
-                          placeholder="Filter page..."
-                          className="pl-8 pr-3 py-1 text-xs rounded-full bg-[#f1f3f4] dark:bg-zinc-900 border border-[#dadce0] dark:border-zinc-800"
+                          placeholder="Search text in PDF..."
+                          className="pl-8 pr-3 py-1 text-xs rounded-full bg-[#f1f3f4] dark:bg-zinc-900 border border-[#dadce0] dark:border-zinc-800 w-52"
                         />
                       </div>
                       <button
                         type="button"
                         onClick={() => setThumbScale((s) => Math.max(0.6, s - 0.2))}
                         aria-label="Zoom Out"
-                        className="p-1.5 rounded-full border border-[#dadce0] dark:border-zinc-700"
+                        className="p-1.5 rounded-full border border-[#dadce0] dark:border-zinc-700 cursor-pointer"
                       >
                         <ZoomOut className="w-3.5 h-3.5" />
                       </button>
@@ -789,12 +967,46 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                         type="button"
                         onClick={() => setThumbScale((s) => Math.min(1.8, s + 0.2))}
                         aria-label="Zoom In"
-                        className="p-1.5 rounded-full border border-[#dadce0] dark:border-zinc-700"
+                        className="p-1.5 rounded-full border border-[#dadce0] dark:border-zinc-700 cursor-pointer"
                       >
                         <ZoomIn className="w-3.5 h-3.5" />
                       </button>
                     </div>
                   </div>
+
+                  {/* Live Search Results Bar */}
+                  {readerSearchQuery.trim() && (
+                    <div className="p-3.5 bg-white dark:bg-[#161b22] rounded-2xl border border-[#dadce0] dark:border-zinc-800 space-y-2 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-mono font-semibold text-[#202124] dark:text-zinc-100">
+                          {readerSearchMatches.length > 0
+                            ? `${readerSearchMatches.reduce((a, b) => a + b.count, 0)} match(es) across ${readerSearchMatches.length} page(s)`
+                            : `No text matches for "${readerSearchQuery.trim()}"`}
+                        </span>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {readerSearchMatches.map((m) => (
+                            <button
+                              key={m.pageIndex}
+                              type="button"
+                              onClick={() => onChangeActivePage(m.pageIndex)}
+                              className={`px-2.5 py-0.5 rounded-full font-mono text-[11px] border cursor-pointer ${
+                                activePageIndex === m.pageIndex
+                                  ? 'bg-[#202124] text-white border-[#202124] dark:bg-zinc-100 dark:text-zinc-950'
+                                  : 'border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800'
+                              }`}
+                            >
+                              Page {m.pageIndex + 1} ({m.count})
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      {readerSearchMatches.find((m) => m.pageIndex === activePageIndex) && (
+                        <div className="p-2.5 rounded-xl bg-[#f8f9fa] dark:bg-zinc-950 font-mono text-[11px] text-[#5f6368] dark:text-zinc-300">
+                          {readerSearchMatches.find((m) => m.pageIndex === activePageIndex)?.snippet}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   <div className="flex justify-center bg-[#f1f3f4] dark:bg-zinc-950 p-6 rounded-2xl border border-[#dadce0] dark:border-zinc-800 overflow-auto">
                     {thumbnails[activePageIndex] && (
@@ -834,13 +1046,13 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                       {lastOutput.diffResult.visualOverlayDataUrls.map((url, idx) => (
                         <div key={idx} className="space-y-1.5">
                           <div className="text-xs font-mono text-[#5f6368]">
-                            PAGE {idx + 1} PIXEL DIFFERENCE OVERLAY
+                            PAGE {idx + 1} VISUAL PIXEL DIFF (RED = ADDED / CHANGED, BLUE = REMOVED)
                           </div>
                           <img
                             src={url}
                             alt={`Visual Diff Page ${idx + 1}`}
                             referrerPolicy="no-referrer"
-                            className="w-full h-auto rounded-lg border border-zinc-700"
+                            className="w-full h-auto rounded-lg border border-[#dadce0] dark:border-zinc-700 bg-white"
                           />
                         </div>
                       ))}
@@ -900,7 +1112,7 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                         setCopiedText(true);
                         setTimeout(() => setCopiedText(false), 1500);
                       }}
-                      className="flex items-center gap-1.5 px-3 py-1 text-xs font-mono rounded-full border border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800"
+                      className="flex items-center gap-1.5 px-3 py-1 text-xs font-mono rounded-full border border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800 cursor-pointer"
                     >
                       <CopyCheck className="w-3.5 h-3.5" />
                       <span>{copiedText ? 'Copied!' : 'Copy Text'}</span>
@@ -912,44 +1124,56 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                 </div>
               )}
 
-              {/* VISUAL PAGE THUMBNAIL GRID */}
+              {/* VISUAL PAGE / IMAGE THUMBNAIL GRID */}
               {!STUDIO_TOOLS.includes(tool.id) &&
                 tool.id !== 'pdf-reader' &&
+                tool.id !== 'html-to-pdf' &&
                 thumbnails.length > 0 && (
                   <div className="space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 bg-white dark:bg-[#161b22] rounded-2xl border border-[#dadce0] dark:border-zinc-800">
                       <div className="flex items-center gap-3">
                         <span className="text-xs font-mono font-semibold text-[#202124] dark:text-zinc-300">
-                          PAGES ({thumbnails.length})
+                          {tool.id === 'images-to-pdf'
+                            ? 'IMAGES'
+                            : tool.id === 'powerpoint-to-pdf'
+                            ? 'SLIDES'
+                            : 'PAGES'}{' '}
+                          ({thumbnails.length})
                         </span>
-                        <button
-                          type="button"
-                          onClick={() => onSelectAllThumbs(true)}
-                          className="flex items-center gap-1 text-xs text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100"
-                        >
-                          <CheckSquare className="w-3.5 h-3.5" />
-                          <span>Select All</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onSelectAllThumbs(false)}
-                          className="flex items-center gap-1 text-xs text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100"
-                        >
-                          <Square className="w-3.5 h-3.5" />
-                          <span>Deselect</span>
-                        </button>
+                        {canSelectPages && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => onSelectAllThumbs(true)}
+                              className="flex items-center gap-1 text-xs text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 cursor-pointer"
+                            >
+                              <CheckSquare className="w-3.5 h-3.5" />
+                              <span>Select All</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onSelectAllThumbs(false)}
+                              className="flex items-center gap-1 text-xs text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 cursor-pointer"
+                            >
+                              <Square className="w-3.5 h-3.5" />
+                              <span>Deselect</span>
+                            </button>
+                          </>
+                        )}
                       </div>
 
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => onInsertBlankThumb(thumbnails.length - 1)}
-                          className="flex items-center gap-1 px-3 py-1 text-xs font-medium rounded-full border border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800"
-                        >
-                          <PlusSquare className="w-3.5 h-3.5" />
-                          <span>Insert Blank Page</span>
-                        </button>
-                      </div>
+                      {canMutatePages && tool.id !== 'rotate-pdf' && (
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => onInsertBlankThumb(thumbnails.length - 1)}
+                            className="flex items-center gap-1 px-3 py-1 text-xs font-medium rounded-full border border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800 cursor-pointer"
+                          >
+                            <PlusSquare className="w-3.5 h-3.5" />
+                            <span>Insert Blank Page</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     {isLoadingThumbnails ? (
@@ -962,12 +1186,22 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                         ))}
                       </div>
                     ) : (
-                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+                      <div
+                        className={
+                          tool.id === 'powerpoint-to-pdf'
+                            ? 'grid grid-cols-1 sm:grid-cols-2 gap-4'
+                            : 'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4'
+                        }
+                      >
                         {thumbnails.map((thumb, idx) => (
                           <div
                             key={`${thumb.sourceFileId}_${thumb.pageIndex}_${idx}`}
-                            onClick={() => onToggleSelectThumb(idx)}
-                            className={`group relative flex flex-col justify-between p-3.5 bg-white dark:bg-[#161b22] rounded-2xl border transition-all cursor-pointer ${
+                            onClick={() => {
+                              if (canSelectPages) onToggleSelectThumb(idx);
+                            }}
+                            className={`group relative flex flex-col justify-between p-3.5 bg-white dark:bg-[#161b22] rounded-2xl border transition-all ${
+                              canSelectPages ? 'cursor-pointer' : ''
+                            } ${
                               thumb.selected
                                 ? 'border-[#202124] dark:border-zinc-100 ring-2 ring-[#202124] dark:ring-zinc-100'
                                 : 'border-[#dadce0] dark:border-zinc-800 hover:border-zinc-400 dark:hover:border-zinc-600'
@@ -975,15 +1209,31 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                           >
                             <div className="flex items-center justify-between mb-2 text-[11px] font-mono">
                               <span className="font-semibold">
-                                Page {idx + 1}
+                                {tool.id === 'images-to-pdf'
+                                  ? `Img ${idx + 1}`
+                                  : tool.id === 'powerpoint-to-pdf'
+                                  ? `Slide ${idx + 1}`
+                                  : `Page ${idx + 1}`}
                                 {thumb.rotation ? ` (${thumb.rotation}°)` : ''}
                               </span>
                               <span className="text-[#5f6368]">
-                                {Math.round(thumb.width)}×{Math.round(thumb.height)}pt
+                                {Math.round(thumb.width)}×{Math.round(thumb.height)}
+                                {tool.id === 'images-to-pdf' ? 'px' : 'pt'}
                               </span>
                             </div>
 
-                            <div className="relative bg-[#f8f9fa] dark:bg-zinc-950 rounded-xl border border-[#dadce0] dark:border-zinc-800 flex items-center justify-center overflow-hidden aspect-[1/1.414]">
+                            <div
+                              className={`relative bg-[#f8f9fa] dark:bg-zinc-950 rounded-xl border border-[#dadce0] dark:border-zinc-800 flex items-center justify-center overflow-hidden ${
+                                tool.id === 'powerpoint-to-pdf'
+                                  ? 'aspect-video'
+                                  : 'aspect-[1/1.414]'
+                              }`}
+                            >
+                              {thumb.selected && (tool.id === 'remove-pages' || tool.id === 'extract-pages') && (
+                                <span className="absolute top-2 right-2 z-10 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950">
+                                  {tool.id === 'remove-pages' ? 'WILL REMOVE' : 'WILL EXTRACT'}
+                                </span>
+                              )}
                               {thumb.isBlank ? (
                                 <span className="text-xs font-mono text-[#5f6368]">
                                   BLANK PAGE
@@ -1001,60 +1251,70 @@ export const CenterCanvas: React.FC<CenterCanvasProps> = ({
                               )}
                             </div>
 
-                            <div
-                              className="flex items-center justify-between pt-2.5 mt-2 border-t border-[#f1f3f4] dark:border-zinc-800"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <div className="flex items-center gap-1">
-                                <button
-                                  type="button"
-                                  disabled={idx === 0}
-                                  onClick={() => onMoveThumb(idx, idx - 1)}
-                                  aria-label={`Move Page ${idx + 1} Left`}
-                                  className="p-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 disabled:opacity-30"
-                                >
-                                  <ArrowLeft className="w-3.5 h-3.5" />
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={idx === thumbnails.length - 1}
-                                  onClick={() => onMoveThumb(idx, idx + 1)}
-                                  aria-label={`Move Page ${idx + 1} Right`}
-                                  className="p-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 disabled:opacity-30"
-                                >
-                                  <ArrowRight className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
+                            {canMutatePages && (
+                              <div
+                                className="flex items-center justify-between pt-2.5 mt-2 border-t border-[#f1f3f4] dark:border-zinc-800"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div className="flex items-center gap-1">
+                                  {tool.id !== 'rotate-pdf' && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        disabled={idx === 0}
+                                        onClick={() => onMoveThumb(idx, idx - 1)}
+                                        aria-label={`Move Page ${idx + 1} Left`}
+                                        className="p-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 disabled:opacity-30 cursor-pointer"
+                                      >
+                                        <ArrowLeft className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={idx === thumbnails.length - 1}
+                                        onClick={() => onMoveThumb(idx, idx + 1)}
+                                        aria-label={`Move Page ${idx + 1} Right`}
+                                        className="p-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 disabled:opacity-30 cursor-pointer"
+                                      >
+                                        <ArrowRight className="w-3.5 h-3.5" />
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
 
-                              <div className="flex items-center gap-1">
-                                <button
-                                  type="button"
-                                  onClick={() => onRotateThumb(idx, 90)}
-                                  aria-label={`Rotate Page ${idx + 1} 90 degrees`}
-                                  className="p-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100"
-                                >
-                                  <RotateCw className="w-3.5 h-3.5" />
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => onDuplicateThumb(idx)}
-                                  aria-label={`Duplicate Page ${idx + 1}`}
-                                  className="p-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100"
-                                >
-                                  <Copy className="w-3.5 h-3.5" />
-                                </button>
-                                {thumbnails.length > 1 && (
+                                <div className="flex items-center gap-1">
                                   <button
                                     type="button"
-                                    onClick={() => onDeleteThumb(idx)}
-                                    aria-label={`Remove Page ${idx + 1}`}
-                                    className="p-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100"
+                                    onClick={() => onRotateThumb(idx, 90)}
+                                    aria-label={`Rotate Page ${idx + 1} 90 degrees`}
+                                    className="p-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 cursor-pointer"
                                   >
-                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <RotateCw className="w-3.5 h-3.5" />
                                   </button>
-                                )}
+                                  {tool.id !== 'rotate-pdf' && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => onDuplicateThumb(idx)}
+                                        aria-label={`Duplicate Page ${idx + 1}`}
+                                        className="p-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 cursor-pointer"
+                                      >
+                                        <Copy className="w-3.5 h-3.5" />
+                                      </button>
+                                      {thumbnails.length > 1 && (
+                                        <button
+                                          type="button"
+                                          onClick={() => onDeleteThumb(idx)}
+                                          aria-label={`Remove Page ${idx + 1}`}
+                                          className="p-1 text-[#5f6368] hover:text-[#202124] dark:hover:text-zinc-100 cursor-pointer"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
                               </div>
-                            </div>
+                            )}
                           </div>
                         ))}
                       </div>

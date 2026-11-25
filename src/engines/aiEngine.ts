@@ -6,11 +6,10 @@ import {
 } from '../types/pdf';
 import {
   itemsToStructuredMarkdown,
-  offlineTranslateText,
   tfIdfSummarize,
 } from '../utils/pdfHelpers';
 import { extractPositionedTextFromPdf } from '../utils/pdfjsClient';
-import { renderStructuredMarkupToPdf } from './convertToPdfEngine';
+import { renderHtmlOrMarkdownToPdf } from '../utils/htmlPdfRenderer';
 import {
   executeAddPageNumbers,
   executeCropPdf,
@@ -20,6 +19,36 @@ import {
 import { executeCompressPdf, executeRepairPdf } from './optimizeEngine';
 import { executeRemovePages } from './organizeEngine';
 import { executeProtectPdf, executeUnlockPdf } from './securityEngine';
+
+export interface CloudAiStatus {
+  configured: boolean;
+  model: string;
+}
+
+function isDesktopFileProtocol(): boolean {
+  return typeof window !== 'undefined' && window.location.protocol === 'file:';
+}
+
+/**
+ * Queries the local Express backend to check if GEMINI_API_KEY is configured in Settings > Secrets.
+ * Skips the request in packaged Electron (file://) where no local Express server is attached.
+ */
+export async function fetchCloudAiStatus(): Promise<CloudAiStatus> {
+  if (isDesktopFileProtocol()) {
+    return { configured: false, model: 'gemini-4-hydrogen' };
+  }
+  try {
+    const res = await fetch('/api/ai/status');
+    if (!res.ok) return { configured: false, model: 'gemini-4-hydrogen' };
+    const data = await res.json();
+    return {
+      configured: Boolean(data?.configured),
+      model: String(data?.model || 'gemini-4-hydrogen'),
+    };
+  } catch {
+    return { configured: false, model: 'gemini-4-hydrogen' };
+  }
+}
 
 /**
  * Checks whether a local Ollama instance is reachable at the configured URL.
@@ -47,7 +76,8 @@ export async function checkOllamaConnection(ollamaUrl = 'http://localhost:11434'
 }
 
 /**
- * Unified Dual AI Engine (Offline Local Ollama + Offline Deterministic TF-IDF + Server Cloud Gemini).
+ * Unified AI Engine — explicitly propagates errors when Cloud AI (Gemini) or Local Ollama is selected
+ * instead of silently failing or faking outputs.
  */
 async function generateWithUnifiedAiEngine(
   prompt: string,
@@ -55,47 +85,67 @@ async function generateWithUnifiedAiEngine(
   settings: AiEngineSettings
 ): Promise<{ text: string; providerUsed: string }> {
   if (settings.mode === 'ollama-local') {
+    const baseUrl = (settings.ollamaUrl || 'http://localhost:11434').replace(/\/$/, '');
+    const modelName = settings.ollamaModel || 'llama3.2';
+    let res: Response;
     try {
-      const baseUrl = (settings.ollamaUrl || 'http://localhost:11434').replace(/\/$/, '');
-      const res = await fetch(`${baseUrl}/api/generate`, {
+      res = await fetch(`${baseUrl}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: settings.ollamaModel || 'llama3.2',
+          model: modelName,
           prompt: `${systemInstruction}\n\n${prompt}`,
           stream: false,
         }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.response) {
-          return {
-            text: String(data.response),
-            providerUsed: `Local Ollama (${settings.ollamaModel || 'llama3.2'})`,
-          };
-        }
-      }
     } catch {
-      // Automatically fall back to Offline Deterministic Engine if Ollama isn't running
+      throw new Error(
+        `Could not connect to Local Ollama at ${baseUrl}. Start Ollama (with OLLAMA_ORIGINS="*" if needed) or switch AI Engine Mode.`
+      );
     }
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(
+        `Local Ollama returned HTTP ${res.status}${errText ? `: ${errText.slice(0, 160)}` : ''}. Verify model "${modelName}" is pulled.`
+      );
+    }
+
+    const data = await res.json();
+    if (!data?.response) {
+      throw new Error('Local Ollama returned an empty response.');
+    }
+    return {
+      text: String(data.response),
+      providerUsed: `Local Ollama (${modelName})`,
+    };
   }
 
   if (settings.mode === 'cloud-gemini') {
-    try {
-      const res = await fetch('/api/ai', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, systemInstruction }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.text) {
-          return { text: String(data.text), providerUsed: 'Cloud AI (Gemini)' };
-        }
-      }
-    } catch {
-      // Automatically fall back to Offline Deterministic Engine when offline
+    if (isDesktopFileProtocol()) {
+      throw new Error(
+        'Cloud AI requires the web server backend. In the Desktop Offline Edition, switch AI Engine Mode to Local Ollama or Offline Extractive.'
+      );
     }
+    const res = await fetch('/api/ai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, systemInstruction }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(
+        data?.error ||
+          `Cloud AI request failed (HTTP ${res.status}). Check GEMINI_API_KEY in Settings > Secrets.`
+      );
+    }
+    if (!data?.text) {
+      throw new Error('Cloud AI returned an empty response.');
+    }
+    return {
+      text: String(data.text),
+      providerUsed: `Cloud AI (${data.model || 'gemini-4-hydrogen'})`,
+    };
   }
 
   return { text: '', providerUsed: 'Offline Deterministic TF-IDF Engine' };
@@ -104,7 +154,7 @@ async function generateWithUnifiedAiEngine(
 /**
  * Tool 31: AI Summarizer
  * Extracts document text and generates Executive Summaries, Key Bullet Points, and Action Items.
- * Works 100% offline via TF-IDF sentence ranking or via Local Ollama / Cloud Gemini.
+ * Runs via Cloud AI (Gemini), Local Ollama, or 100% Offline Extractive TF-IDF.
  */
 export async function executeAiSummarizer(
   file: UploadedFileItem,
@@ -112,32 +162,41 @@ export async function executeAiSummarizer(
   aiSettings: AiEngineSettings,
   onProgress?: (msg: string) => void
 ): Promise<EngineOutput> {
-  onProgress?.('Extracting PDF text layer for intelligence analysis...');
+  onProgress?.('Extracting PDF text layer for analysis...');
   const { fullText, pageTexts } = await extractPositionedTextFromPdf(file.bytes);
+
+  if (!fullText.trim()) {
+    throw new Error(
+      'No extractable text found in this PDF (it may be a scanned image). Run OCR PDF first, then chain into AI Summarizer.'
+    );
+  }
 
   const lengthMap: Record<string, number> = { short: 3, medium: 5, long: 8 };
   const targetSentences = lengthMap[params.summaryLength || 'medium'] || 5;
-
-  // Always compute the deterministic TF-IDF baseline
   const tfIdf = tfIdfSummarize(fullText, targetSentences);
 
   let markdownReport = '';
-  let providerUsed = 'Offline Deterministic TF-IDF Engine';
+  let providerUsed = 'Offline Extractive TF-IDF Engine';
 
-  if (aiSettings.mode !== 'offline-extractive' && fullText.trim().length > 0) {
-    onProgress?.(`Querying ${aiSettings.mode === 'ollama-local' ? 'Local Ollama' : 'Cloud AI'}...`);
+  if (aiSettings.mode !== 'offline-extractive') {
+    onProgress?.(
+      `Generating summary via ${
+        aiSettings.mode === 'ollama-local' ? 'Local Ollama' : 'Cloud AI (Gemini)'
+      }...`
+    );
     const aiRes = await generateWithUnifiedAiEngine(
-      `Summarize the following PDF document (${params.summaryLength || 'medium'} length, ${params.analysisDepth || 'deep'} depth). Provide:\n# Executive Summary\n## Key Bullet Points\n## Action Items\n\nDocument Content:\n${fullText.slice(0, 18000)}`,
-      'You are MONO PDF Intelligence Engine. Output clean structured Markdown.',
+      `Summarize the following PDF document (${params.summaryLength || 'medium'} length, ${
+        params.analysisDepth || 'deep'
+      } depth). Output clean Markdown with:\n# Executive Summary\n## Key Bullet Points\n## Action Items\n\nDocument Content:\n${fullText.slice(
+        0,
+        24000
+      )}`,
+      'You are a concise executive document analyst. Output clean structured Markdown without preamble.',
       aiSettings
     );
-    if (aiRes.text) {
-      markdownReport = aiRes.text;
-      providerUsed = aiRes.providerUsed;
-    }
-  }
-
-  if (!markdownReport) {
+    markdownReport = aiRes.text;
+    providerUsed = aiRes.providerUsed;
+  } else {
     markdownReport = [
       `# Executive Summary: ${file.name}`,
       ``,
@@ -149,15 +208,16 @@ export async function executeAiSummarizer(
       `## Action Items & Obligations`,
       ...tfIdf.actionItems.map((a) => `- ${a}`),
       ``,
-      `## Document Telemetry & Top Entities`,
-      `- Pages Analyzed: ${pageTexts.length}`,
-      `- Word Count: ${tfIdf.wordCount} words (${tfIdf.sentenceCount} sentences)`,
-      `- Top Domain Terms: ${tfIdf.topKeywords.join(', ') || 'N/A'}`,
-      `- Engine Used: ${providerUsed}`,
+      `## Document Metrics`,
+      `- **Pages Analyzed:** ${pageTexts.length}`,
+      `- **Word Count:** ${tfIdf.wordCount} words (${tfIdf.sentenceCount} sentences)`,
+      `- **Top Terms:** ${tfIdf.topKeywords.join(', ') || 'N/A'}`,
+      `- **Engine:** ${providerUsed}`,
     ].join('\n');
   }
 
-  const compiledPdf = await renderStructuredMarkupToPdf(
+  onProgress?.('Rendering formatted summary PDF...');
+  const compiledPdf = await renderHtmlOrMarkdownToPdf(
     markdownReport,
     'markdown',
     `${file.name.replace(/\.pdf$/i, '')}_executive_summary.pdf`,
@@ -172,7 +232,7 @@ export async function executeAiSummarizer(
       Engine: providerUsed,
       'Pages Analyzed': pageTexts.length,
       'Word Count': tfIdf.wordCount,
-      'Key Entities': tfIdf.topKeywords.slice(0, 5).join(', '),
+      'Key Terms': tfIdf.topKeywords.slice(0, 5).join(', '),
     },
     summaryMessage: `Generated Executive Summary, Bullet Points & Action Items via ${providerUsed}.`,
   };
@@ -180,8 +240,7 @@ export async function executeAiSummarizer(
 
 /**
  * Tool 32: Translate PDF
- * Translates PDF content across languages while generating a new downloadable PDF
- * that preserves paragraph structure and page breaks.
+ * Translates PDF content via Cloud AI (Gemini) or Local Ollama and renders a full Unicode PDF.
  */
 export async function executeTranslatePdf(
   file: UploadedFileItem,
@@ -189,50 +248,57 @@ export async function executeTranslatePdf(
   aiSettings: AiEngineSettings,
   onProgress?: (msg: string) => void
 ): Promise<EngineOutput> {
+  if (aiSettings.mode === 'offline-extractive') {
+    throw new Error(
+      'Accurate document translation requires an LLM engine. Switch AI Engine Mode to "Cloud AI (Gemini)" (configure GEMINI_API_KEY in Settings > Secrets) or "Local Ollama" running on your machine.'
+    );
+  }
+
   const targetLang = String(params.targetLanguage || 'Spanish');
   onProgress?.(`Extracting text across pages for ${targetLang} translation...`);
-  const { pageTexts } = await extractPositionedTextFromPdf(file.bytes);
+  const { pageTexts, fullText } = await extractPositionedTextFromPdf(file.bytes);
+
+  if (!fullText.trim()) {
+    throw new Error(
+      'No extractable text found in this PDF. Run OCR PDF first to extract text from scanned pages.'
+    );
+  }
 
   const translatedPages: string[] = [];
-  let providerUsed = 'Offline Deterministic Lexicon Engine';
+  let providerUsed = '';
 
   for (let i = 0; i < pageTexts.length; i++) {
     const rawPage = pageTexts[i] || '';
     if (!rawPage.trim()) {
-      translatedPages.push(`## Page ${i + 1}\n(Blank Page)`);
+      translatedPages.push(`## Page ${i + 1}\n*(Blank Page)*`);
       continue;
     }
 
     onProgress?.(`Translating Page ${i + 1} of ${pageTexts.length} into ${targetLang}...`);
-    let pageTranslated = '';
-
-    if (aiSettings.mode !== 'offline-extractive') {
-      const aiRes = await generateWithUnifiedAiEngine(
-        `Translate the following page text accurately into ${targetLang}. Preserve headings and bullet points:\n\n${rawPage.slice(0, 6000)}`,
-        `You are a professional document translator. Translate into ${targetLang} using clean Markdown.`,
-        aiSettings
-      );
-      if (aiRes.text) {
-        pageTranslated = aiRes.text;
-        providerUsed = aiRes.providerUsed;
-      }
-    }
-
-    if (!pageTranslated) {
-      pageTranslated = offlineTranslateText(rawPage, targetLang);
-    }
+    const aiRes = await generateWithUnifiedAiEngine(
+      `Translate the following PDF page accurately and naturally into ${targetLang}. Preserve headings, paragraphs, numbers, and bullet points. Do not add extra commentary:\n\n${rawPage.slice(
+        0,
+        8000
+      )}`,
+      `You are a professional document translator. Translate faithfully into ${targetLang} using clean Markdown.`,
+      aiSettings
+    );
+    providerUsed = aiRes.providerUsed;
 
     if (params.bilingualSideBySide) {
       translatedPages.push(
-        `## Page ${i + 1} (Source + ${targetLang})\n### Source Text\n${rawPage}\n\n### ${targetLang} Translation\n${pageTranslated}`
+        `## Page ${i + 1}\n### Source\n${rawPage}\n\n### ${targetLang}\n${aiRes.text}`
       );
     } else {
-      translatedPages.push(`## Page ${i + 1}\n${pageTranslated}`);
+      translatedPages.push(`## Page ${i + 1}\n${aiRes.text}`);
     }
   }
 
-  const combinedMd = `# ${file.name.replace(/\.pdf$/i, '')} (${targetLang})\n\n` + translatedPages.join('\n\n');
-  const compiled = await renderStructuredMarkupToPdf(
+  const combinedMd =
+    `# ${file.name.replace(/\.pdf$/i, '')} (${targetLang})\n\n` + translatedPages.join('\n\n---\n\n');
+
+  onProgress?.('Compiling translated PDF with full Unicode support...');
+  const compiled = await renderHtmlOrMarkdownToPdf(
     combinedMd,
     'markdown',
     `${file.name.replace(/\.pdf$/i, '')}_${targetLang.toLowerCase()}.pdf`,
@@ -248,14 +314,12 @@ export async function executeTranslatePdf(
       'Translation Engine': providerUsed,
       'Pages Translated': pageTexts.length,
     },
-    summaryMessage: `Translated ${pageTexts.length} page(s) into ${targetLang} (${providerUsed}).`,
+    summaryMessage: `Translated ${pageTexts.length} page(s) into ${targetLang} via ${providerUsed}.`,
   };
 }
 
 /**
  * Tool 33: PDF to Markdown (.md)
- * Extracts text items, font heights, and X/Y positions via pdfjs-dist and converts into
- * structured Markdown (# H1, ## H2, ### H3, lists, tables) with downloadable .md output.
  */
 export async function executePdfToMarkdown(
   file: UploadedFileItem,
@@ -298,8 +362,6 @@ export async function executePdfToMarkdown(
 
 /**
  * Tool 34: Custom Automated Workflows (Pipeline Builder)
- * Executes an ordered sequence of PDF tools on an uploaded PDF file in a single click,
- * chaining the output Uint8Array from step N into step N+1 automatically.
  */
 export async function executeWorkflowPipeline(
   initialFile: UploadedFileItem,
@@ -345,6 +407,7 @@ export async function executeWorkflowPipeline(
         break;
       case 'protect-pdf':
         stepOut = await executeProtectPdf(currentFile, {
+          password: step.params.password || 'protected',
           ...step.params,
           encryptionMode: 'protected-pdf',
         });
@@ -353,7 +416,6 @@ export async function executeWorkflowPipeline(
         stepOut = await executeUnlockPdf(currentFile, step.params, onProgress);
         break;
       default:
-        // Fallback pass-through for non-PDF-returning steps
         stepOut = await executeRepairPdf(currentFile, step.params);
         break;
     }

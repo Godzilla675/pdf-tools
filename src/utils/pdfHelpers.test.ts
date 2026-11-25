@@ -11,6 +11,23 @@ import {
   itemsToStructuredMarkdown,
 } from './pdfHelpers';
 import { TOOLS_REGISTRY } from '../registry/toolsRegistry';
+import {
+  sanitizeHtmlForRendering,
+  detectMarkupFormat,
+  buildPrintableHtmlDocument,
+  stripHtmlToCleanPlainText,
+} from './htmlPdfRenderer';
+import {
+  DEFAULT_PPTX_THEME,
+  emuToPx,
+  emuToPt,
+  transformChildBoxInGroup,
+  applyColorModifiers,
+  resolveSchemeColorHex,
+  resolveFontFamilyCss,
+  resolveZipTargetPath,
+  formatAutoNumberBullet,
+} from './pptxColorAndMath';
 
 test('TOOLS_REGISTRY contains all 33 core tools plus Workflows and Reader', () => {
   const numberedTools = TOOLS_REGISTRY.filter((t) => t.number >= 1 && t.number <= 33);
@@ -142,3 +159,107 @@ test('groupItemsIntoTableRows and itemsToStructuredMarkdown convert positioned i
   assert.ok(md.includes('# Document Title'));
   assert.ok(md.includes('- Bullet item one'));
 });
+
+test('htmlPdfRenderer detects HTML vs Markdown accurately', () => {
+  assert.equal(detectMarkupFormat('<!DOCTYPE html><html><body><h1>Hi</h1></body></html>'), 'html');
+  assert.equal(detectMarkupFormat('<div class="card"><p>Hello</p></div>'), 'html');
+  assert.equal(detectMarkupFormat('# Heading\n\n- Bullet one\n- Bullet two'), 'markdown');
+  assert.equal(detectMarkupFormat('plain text', 'report.html'), 'html');
+  assert.equal(detectMarkupFormat('plain text', 'notes.md'), 'markdown');
+});
+
+test('sanitizeHtmlForRendering removes scripts and inline event handlers while keeping CSS styles', () => {
+  const dirty =
+    '<style>body { color: #111; } .badge { background: #222; }</style>' +
+    '<div class="badge" onclick="alert(1)">Invoice #42</div>' +
+    '<script>window.pwn = true;</script>' +
+    '<a href="javascript:evil()">Link</a>';
+  const clean = sanitizeHtmlForRendering(dirty);
+  assert.ok(clean.includes('<style>body { color: #111; }'));
+  assert.ok(clean.includes('Invoice #42'));
+  assert.ok(!clean.includes('<script'));
+  assert.ok(!clean.includes('onclick='));
+  assert.ok(!clean.includes('javascript:'));
+});
+
+test('buildPrintableHtmlDocument renders Markdown to real HTML tags and preserves HTML styles', () => {
+  const mdDoc = buildPrintableHtmlDocument('# Quarterly Report\n\n| Metric | Value |\n|---|---|\n| Revenue | $12M |', 'markdown');
+  assert.ok(mdDoc.includes('<h1>Quarterly Report</h1>'));
+  assert.ok(mdDoc.includes('<table>'));
+  assert.ok(mdDoc.includes('$12M'));
+
+  const htmlDoc = buildPrintableHtmlDocument('<html><head><style>.hero { font-size: 32px; }</style></head><body><div class="hero">Styled Title</div></body></html>', 'html');
+  assert.ok(htmlDoc.includes('.hero { font-size: 32px; }'));
+  assert.ok(htmlDoc.includes('<div class="hero">Styled Title</div>'));
+});
+
+test('stripHtmlToCleanPlainText never leaks CSS style blocks or HTML tags into plain text', () => {
+  const html =
+    '<!DOCTYPE html><html><head><style>body { font-family: Arial; color: red; }</style></head>' +
+    '<body><h1>Invoice #1042</h1><p>Total due: &dollar;500 &amp; tax.</p></body></html>';
+  const plain = stripHtmlToCleanPlainText(html);
+  assert.ok(!plain.includes('font-family'));
+  assert.ok(!plain.includes('<h1>'));
+  assert.ok(plain.includes('Invoice #1042'));
+  assert.ok(plain.includes('Total due:'));
+});
+
+test('pptxColorAndMath converts EMUs and transforms grouped child coordinates accurately', () => {
+  // Standard 16:9 slide: 12192000 x 6858000 EMU = 960 x 540 pt = 1280 x 720 px
+  assert.equal(emuToPt(12192000), 960);
+  assert.equal(emuToPt(6858000), 540);
+  assert.equal(emuToPx(12192000), 1280);
+  assert.equal(emuToPx(6858000), 720);
+
+  const mapped = transformChildBoxInGroup(
+    { x: 100, y: 50, w: 200, h: 100, rot: 15 },
+    {
+      offX: 1000,
+      offY: 500,
+      extX: 800,
+      extY: 400,
+      chOffX: 0,
+      chOffY: 0,
+      chExtX: 400,
+      chExtY: 200,
+      rot: 30,
+    }
+  );
+  assert.equal(mapped.x, 1200);
+  assert.equal(mapped.y, 600);
+  assert.equal(mapped.w, 400);
+  assert.equal(mapped.h, 200);
+  assert.equal(mapped.rot, 45);
+});
+
+test('pptxColorAndMath applies OOXML color modifiers, resolves scheme colors, fonts, zip paths, and bullets', () => {
+  // 50% shade on pure white => ~#808080
+  assert.equal(applyColorModifiers('FFFFFF', { shade: 50000 }), '#808080');
+  // 50% tint on pure black => ~#808080
+  assert.equal(applyColorModifiers('000000', { tint: 50000 }), '#808080');
+  // 50% alpha => rgba
+  assert.equal(applyColorModifiers('102030', { alpha: 50000 }), 'rgba(16, 32, 48, 0.500)');
+
+  assert.equal(resolveSchemeColorHex('bg1', DEFAULT_PPTX_THEME), 'FFFFFF');
+  assert.equal(resolveSchemeColorHex('tx1', DEFAULT_PPTX_THEME), '000000');
+  assert.equal(resolveSchemeColorHex('phClr', DEFAULT_PPTX_THEME, '#FF5500'), 'FF5500');
+
+  assert.ok(resolveFontFamilyCss('+mj-lt', DEFAULT_PPTX_THEME).includes('Calibri Light'));
+  assert.ok(resolveFontFamilyCss('+mn-lt', DEFAULT_PPTX_THEME).includes('Calibri'));
+  assert.ok(resolveFontFamilyCss('Georgia', DEFAULT_PPTX_THEME).includes('serif'));
+
+  assert.equal(
+    resolveZipTargetPath('ppt/slides/slide1.xml', '../media/image1.png'),
+    'ppt/media/image1.png'
+  );
+  assert.equal(
+    resolveZipTargetPath('ppt/presentation.xml', 'slides/slide2.xml'),
+    'ppt/slides/slide2.xml'
+  );
+
+  assert.equal(formatAutoNumberBullet('arabicPeriod', 3), '3.');
+  assert.equal(formatAutoNumberBullet('alphaUcPeriod', 2), 'B.');
+  assert.equal(formatAutoNumberBullet('romanUcPeriod', 4), 'IV.');
+});
+
+

@@ -199,13 +199,14 @@ export const TOOLS_REGISTRY: ToolDefinition[] = [
     shortName: 'PPTX to PDF',
     category: 'convert-to-pdf',
     categoryLabel: 'Convert to PDF',
-    description: 'Unzip .pptx archives in memory, extract slide XML content & media, and render 16:9 landscape slides.',
+    description: 'Exact OOXML PowerPoint renderer preserving slide dimensions, masters, shapes, images, tables, charts, and searchable text.',
     acceptedFormats: '.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation',
     multipleFiles: false,
     supportsChainInput: false,
     defaultParams: {
-      theme: 'light', // 'light' | 'dark'
-      includeSlideNumbers: true,
+      theme: 'original', // 'original' | 'light' | 'dark'
+      qualityScale: 2, // 1.5 | 2 | 3
+      includeSlideNumbers: false,
     },
   },
   {
@@ -237,9 +238,10 @@ export const TOOLS_REGISTRY: ToolDefinition[] = [
     multipleFiles: false,
     supportsChainInput: false,
     defaultParams: {
-      sourceFormat: 'markdown', // 'markdown' | 'html'
-      rawContent: `# pdf tools Architectural Specification\n\n## 01. Executive Summary\npdf tools executes **100% client-side byte manipulation** across 33 specialized tools without external servers.\n\n- Zero cloud latency or privacy leakage\n- Native Uint8Array pipeline chaining\n- ISO PDF/A-1b and PDF/A-2b archival compliance\n\n## 02. Benchmark Telemetry\n| Operation | Input Size | Output Size | Execution Time |\n| :--- | :--- | :--- | :--- |\n| Compress (Recommended) | 4.20 MB | 1.18 MB | 310 ms |\n| Destructive Redaction | 1.85 MB | 1.42 MB | 190 ms |\n| Smart Content Split | 6.10 MB | 6 Files | 145 ms |\n`,
+      sourceFormat: 'html', // 'html' | 'markdown'
+      rawContent: '',
       pageSize: 'A4',
+      fontSize: 11,
     },
   },
 
@@ -487,12 +489,12 @@ export const TOOLS_REGISTRY: ToolDefinition[] = [
     multipleFiles: false,
     supportsChainInput: true,
     defaultParams: {
-      signerName: 'A. Mercer (Authorized Signatory)',
-      signerTitle: 'Principal Systems Architect',
+      signerName: '',
+      signerTitle: '',
       includeDateStamp: true,
       appendAuditTrailPage: true,
-      signatureStyle: 'drawn', // 'drawn' | 'typed'
-      typedText: 'A. Mercer',
+      signatureStyle: 'drawn', // 'drawn' | 'typed' | 'upload'
+      typedText: '',
     },
   },
   {
@@ -602,7 +604,7 @@ export const TOOLS_REGISTRY: ToolDefinition[] = [
     shortName: 'PDF Reader',
     category: 'reader',
     categoryLabel: 'Built-in Reader',
-    description: 'High-contrast macOS monochrome document reader with text search, zoom, and page inspection.',
+    description: 'Clean monochrome PDF document reader with live text search, zoom, and page navigation.',
     acceptedFormats: '.pdf,application/pdf',
     multipleFiles: false,
     supportsChainInput: true,

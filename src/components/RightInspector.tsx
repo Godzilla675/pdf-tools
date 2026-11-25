@@ -6,6 +6,7 @@ import {
   RefreshCw,
   CheckCircle2,
   AlertCircle,
+  Eye,
 } from 'lucide-react';
 import {
   AiEngineSettings,
@@ -27,6 +28,7 @@ interface RightInspectorProps {
   onChangeParam: (key: string, val: any) => void;
   aiSettings: AiEngineSettings;
   onChangeAiSettings: React.Dispatch<React.SetStateAction<AiEngineSettings>>;
+  cloudAiStatus: { configured: boolean; model: string };
   isProcessing: boolean;
   progressMessage: string;
   errorMessage: string;
@@ -38,6 +40,9 @@ interface RightInspectorProps {
   onUploadWatermarkImage: (bytes: Uint8Array) => void;
 }
 
+const INPUT_CLASS =
+  'w-full px-3 py-2 text-xs rounded-xl bg-[#f8f9fa] dark:bg-zinc-900 border border-[#dadce0] dark:border-zinc-800 text-[#202124] dark:text-zinc-100 focus:outline-none focus:border-[#202124] dark:focus:border-zinc-400';
+
 export const RightInspector: React.FC<RightInspectorProps> = ({
   tool,
   files,
@@ -46,6 +51,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   onChangeParam,
   aiSettings,
   onChangeAiSettings,
+  cloudAiStatus,
   isProcessing,
   progressMessage,
   errorMessage,
@@ -69,14 +75,14 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   );
 
   const probeOllama = async () => {
-    setOllamaStatus('Probing...');
+    setOllamaStatus('Checking...');
     const res = await checkOllamaConnection(aiSettings.ollamaUrl);
     if (res.online) {
       setOllamaStatus(
         `Connected (${res.models.length > 0 ? res.models.slice(0, 2).join(', ') : 'Ready'})`
       );
     } else {
-      setOllamaStatus('Offline (Using TF-IDF Fallback)');
+      setOllamaStatus('Not running on localhost:11434');
     }
   };
 
@@ -87,14 +93,14 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   return (
     <aside
       aria-label="Tool Inspector Panel"
-      className="w-80 shrink-0 min-h-[calc(100vh-4rem)] flex flex-col bg-white dark:bg-[#161b22] border-l border-[#dadce0] dark:border-zinc-800 select-none"
+      className="w-80 shrink-0 sticky top-16 h-[calc(100vh-4rem)] flex flex-col bg-white dark:bg-[#161b22] border-l border-[#dadce0] dark:border-zinc-800 select-none"
     >
       {/* Inspector Header */}
       <div className="h-12 px-4 border-b border-[#dadce0] dark:border-zinc-800 flex items-center justify-between">
-        <span className="text-xs font-mono font-bold tracking-wider uppercase text-[#202124] dark:text-zinc-100">
+        <span className="text-xs font-mono font-bold tracking-wider uppercase text-[#202124] dark:text-zinc-100 truncate">
           {tool.name} Options
         </span>
-        <span className="text-[11px] font-mono text-[#5f6368] tabular-nums">
+        <span className="text-[11px] font-mono text-[#5f6368] tabular-nums shrink-0 ml-2">
           #{tool.number > 0 ? String(tool.number).padStart(2, '0') : 'RD'}
         </span>
       </div>
@@ -102,32 +108,32 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
       {/* Scrollable Inspector Controls */}
       <div className="flex-1 overflow-y-auto p-4 space-y-5">
         {/* Real-time Telemetry Block */}
-        <div className="p-3 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 space-y-2">
-          <div className="text-[11px] font-mono text-zinc-500 uppercase">
-            INPUT STREAM TELEMETRY
+        <div className="p-3.5 rounded-2xl bg-[#f8f9fa] dark:bg-zinc-900 border border-[#dadce0] dark:border-zinc-800 space-y-2">
+          <div className="text-[10px] font-mono font-semibold text-[#5f6368] uppercase tracking-wider">
+            INPUT TELEMETRY
           </div>
           <div className="grid grid-cols-2 gap-2 text-xs font-mono tabular-nums">
             <div>
-              <div className="text-zinc-400 text-[10px]">FILES</div>
-              <div className="font-semibold text-zinc-900 dark:text-zinc-100">
+              <div className="text-[#5f6368] text-[10px]">FILES</div>
+              <div className="font-semibold text-[#202124] dark:text-zinc-100">
                 {files.length}
               </div>
             </div>
             <div>
-              <div className="text-zinc-400 text-[10px]">INPUT SIZE</div>
-              <div className="font-semibold text-zinc-900 dark:text-zinc-100">
+              <div className="text-[#5f6368] text-[10px]">INPUT SIZE</div>
+              <div className="font-semibold text-[#202124] dark:text-zinc-100">
                 {formatBytes(totalInputBytes)}
               </div>
             </div>
             <div>
-              <div className="text-zinc-400 text-[10px]">TOTAL PAGES</div>
-              <div className="font-semibold text-zinc-900 dark:text-zinc-100">
+              <div className="text-[#5f6368] text-[10px]">TOTAL PAGES</div>
+              <div className="font-semibold text-[#202124] dark:text-zinc-100">
                 {totalPages}
               </div>
             </div>
             <div>
-              <div className="text-zinc-400 text-[10px]">SELECTED</div>
-              <div className="font-semibold text-zinc-900 dark:text-zinc-100">
+              <div className="text-[#5f6368] text-[10px]">SELECTED</div>
+              <div className="font-semibold text-[#202124] dark:text-zinc-100">
                 {selectedCount}p
               </div>
             </div>
@@ -145,9 +151,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   aria-label="File Sort Order"
                   value={params.sortOrder || 'custom'}
                   onChange={(e) => onChangeParam('sortOrder', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
-                  <option value="custom">Custom Drag Order</option>
+                  <option value="custom">Custom Visual Order</option>
                   <option value="az">Filename A → Z</option>
                   <option value="za">Filename Z → A</option>
                 </select>
@@ -158,7 +164,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   aria-label="Page Selection Scope"
                   value={params.selectionMode || 'all'}
                   onChange={(e) => onChangeParam('selectionMode', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="all">Merge All Pages</option>
                   <option value="selected">Merge Visually Selected Pages Only</option>
@@ -176,7 +182,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   aria-label="Split Engine Mode"
                   value={params.splitMode || 'ranges'}
                   onChange={(e) => onChangeParam('splitMode', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="ranges">(a) Custom Page Ranges</option>
                   <option value="interval">(b) Fixed Page Interval (Every N)</option>
@@ -194,7 +200,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                       type="text"
                       value={params.rangeString || '1-2, 3'}
                       onChange={(e) => onChangeParam('rangeString', e.target.value)}
-                      className="w-full px-2.5 py-2 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                      className={`${INPUT_CLASS} font-mono`}
                     />
                   </div>
                   <label className="flex items-center gap-2 text-xs">
@@ -217,7 +223,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                     min={1}
                     value={params.intervalPages || 2}
                     onChange={(e) => onChangeParam('intervalPages', Number(e.target.value))}
-                    className="w-full px-2.5 py-2 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                    className={`${INPUT_CLASS} font-mono`}
                   />
                 </div>
               )}
@@ -230,7 +236,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                     type="text"
                     value={params.smartMarker || 'Chapter|Invoice #|Page 1 of'}
                     onChange={(e) => onChangeParam('smartMarker', e.target.value)}
-                    className="w-full px-2.5 py-2 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                    className={`${INPUT_CLASS} font-mono`}
                   />
                 </div>
               )}
@@ -248,7 +254,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   type="text"
                   value={params.removeRanges || '2'}
                   onChange={(e) => onChangeParam('removeRanges', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
               <label className="flex items-center gap-2 text-xs">
@@ -273,7 +279,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   type="text"
                   value={params.extractRanges || '1, 3'}
                   onChange={(e) => onChangeParam('extractRanges', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
               <label className="flex items-center gap-2 text-xs">
@@ -290,7 +296,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           {/* 5. Organize PDF */}
           {tool.id === 'organize-pdf' && (
             <div className="space-y-2">
-              <p className="text-xs text-zinc-500">
+              <p className="text-xs text-[#5f6368]">
                 Use the thumbnail controls in the center canvas to reorder pages, rotate 90°, duplicate pages, or insert blank pages.
               </p>
               <label className="flex items-center gap-2 text-xs">
@@ -312,9 +318,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.filterMode || 'adaptive-mono'}
                   onChange={(e) => onChangeParam('filterMode', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
-                  <option value="adaptive-mono">Adaptive Monochrome B&W</option>
+                  <option value="adaptive-mono">Adaptive Monochrome B&amp;W</option>
                   <option value="high-contrast-gray">High-Contrast Grayscale</option>
                   <option value="original">Unfiltered Original</option>
                 </select>
@@ -329,7 +335,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   max={210}
                   value={params.threshold ?? 145}
                   onChange={(e) => onChangeParam('threshold', Number(e.target.value))}
-                  className="w-full accent-zinc-900 dark:accent-zinc-100"
+                  className="w-full accent-[#202124] dark:accent-zinc-100"
                 />
               </div>
               <div className="space-y-1.5">
@@ -337,7 +343,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.pageSize || 'A4'}
                   onChange={(e) => onChangeParam('pageSize', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="A4">ISO A4</option>
                   <option value="Letter">US Letter</option>
@@ -356,11 +362,11 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   aria-label="Compression Preset"
                   value={params.preset || 'recommended'}
                   onChange={(e) => onChangeParam('preset', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="extreme">Extreme (0.4 Quality, 1.0x Scale)</option>
-                  <option value="recommended">Recommended (0.65 Quality, 1.25x Scale)</option>
-                  <option value="less">Less Compression (0.85 Quality, 1.5x Scale)</option>
+                  <option value="recommended">Recommended (Balanced / Smart Lossless)</option>
+                  <option value="less">Less Compression (High Quality)</option>
                 </select>
               </div>
               <label className="flex items-center gap-2 text-xs">
@@ -383,7 +389,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   checked={params.deepStreamRebuild !== false}
                   onChange={(e) => onChangeParam('deepStreamRebuild', e.target.checked)}
                 />
-                <span>Fault-tolerant XRef & page tree reconstruction</span>
+                <span>Fault-tolerant XRef &amp; page tree reconstruction</span>
               </label>
               <label className="flex items-center gap-2 text-xs">
                 <input
@@ -404,7 +410,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.language || 'eng'}
                   onChange={(e) => onChangeParam('language', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="eng">English (eng)</option>
                   <option value="spa">Spanish (spa)</option>
@@ -431,7 +437,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.pageSize || 'A4'}
                   onChange={(e) => onChangeParam('pageSize', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="Fit">Fit to Image Dimensions</option>
                   <option value="A4">A4 (595 × 842 pt)</option>
@@ -443,7 +449,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.orientation || 'auto'}
                   onChange={(e) => onChangeParam('orientation', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="auto">Auto (Match Image Aspect)</option>
                   <option value="portrait">Portrait</option>
@@ -455,7 +461,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.margin || 'small'}
                   onChange={(e) => onChangeParam('margin', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="none">None (0 pt)</option>
                   <option value="small">Small (20 pt)</option>
@@ -468,12 +474,26 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           {/* 11. Word to PDF & 14. HTML/MD to PDF */}
           {(tool.id === 'word-to-pdf' || tool.id === 'html-to-pdf') && (
             <>
+              {tool.id === 'html-to-pdf' && (
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold block">Source Markup Format</label>
+                  <select
+                    aria-label="Source Markup Format"
+                    value={params.sourceFormat || 'html'}
+                    onChange={(e) => onChangeParam('sourceFormat', e.target.value)}
+                    className={INPUT_CLASS}
+                  >
+                    <option value="html">HTML + CSS (Rendered Webpage)</option>
+                    <option value="markdown">Markdown (GFM Rendered)</option>
+                  </select>
+                </div>
+              )}
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold block">Page Size</label>
                 <select
                   value={params.pageSize || 'A4'}
                   onChange={(e) => onChangeParam('pageSize', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="A4">A4</option>
                   <option value="Letter">US Letter</option>
@@ -487,7 +507,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   max={18}
                   value={params.fontSize || 11}
                   onChange={(e) => onChangeParam('fontSize', Number(e.target.value))}
-                  className="w-full px-2.5 py-2 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
             </>
@@ -497,23 +517,38 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           {tool.id === 'powerpoint-to-pdf' && (
             <>
               <div className="space-y-1.5">
-                <label className="text-xs font-semibold block">16:9 Slide Theme</label>
+                <label className="text-xs font-semibold block">Slide Layout Fidelity</label>
                 <select
-                  value={params.theme || 'light'}
+                  aria-label="Slide Layout Fidelity"
+                  value={params.theme || 'original'}
                   onChange={(e) => onChangeParam('theme', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
-                  <option value="light">Stark White Monochrome</option>
-                  <option value="dark">Obsidian Dark Monochrome</option>
+                  <option value="original">Exact Original Layout (Recommended)</option>
+                  <option value="light">Override Light Background</option>
+                  <option value="dark">Override Dark Background</option>
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold block">Render Quality</label>
+                <select
+                  aria-label="Render Quality"
+                  value={params.qualityScale || 2}
+                  onChange={(e) => onChangeParam('qualityScale', Number(e.target.value))}
+                  className={INPUT_CLASS}
+                >
+                  <option value={1.5}>Standard (1.5x · Fast)</option>
+                  <option value={2}>High Fidelity (2x · 192 DPI)</option>
+                  <option value={3}>Archival Crisp (3x · 288 DPI)</option>
                 </select>
               </div>
               <label className="flex items-center gap-2 text-xs">
                 <input
                   type="checkbox"
-                  checked={params.includeSlideNumbers !== false}
+                  checked={Boolean(params.includeSlideNumbers)}
                   onChange={(e) => onChangeParam('includeSlideNumbers', e.target.checked)}
                 />
-                <span>Stamp slide index badge</span>
+                <span>Overlay extra slide number badge</span>
               </label>
             </>
           )}
@@ -526,7 +561,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.orientation || 'landscape'}
                   onChange={(e) => onChangeParam('orientation', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="landscape">Landscape (Wide Table)</option>
                   <option value="portrait">Portrait</option>
@@ -538,7 +573,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   checked={params.showGridlines !== false}
                   onChange={(e) => onChangeParam('showGridlines', e.target.checked)}
                 />
-                <span>Draw monochrome cell borders</span>
+                <span>Draw cell gridlines</span>
               </label>
             </>
           )}
@@ -551,7 +586,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.mode || 'render'}
                   onChange={(e) => onChangeParam('mode', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="render">(a) Render Every PDF Page</option>
                   <option value="extract-embedded">(b) Extract Embedded Image Streams</option>
@@ -562,7 +597,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.format || 'png'}
                   onChange={(e) => onChangeParam('format', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="png">Lossless PNG</option>
                   <option value="jpeg">High-Efficiency JPG</option>
@@ -573,7 +608,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.dpiScale || 2}
                   onChange={(e) => onChangeParam('dpiScale', Number(e.target.value))}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value={1}>1x (72 DPI)</option>
                   <option value={2}>2x (150 DPI)</option>
@@ -592,7 +627,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   checked={params.detectHeadings !== false}
                   onChange={(e) => onChangeParam('detectHeadings', e.target.checked)}
                 />
-                <span>Infer H1/H2 headings from font height</span>
+                <span>Infer H1/H2 headings from font size</span>
               </label>
               <label className="flex items-center gap-2 text-xs">
                 <input
@@ -612,7 +647,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               <select
                 value={params.mode || 'hybrid'}
                 onChange={(e) => onChangeParam('mode', e.target.value)}
-                className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                className={INPUT_CLASS}
               >
                 <option value="hybrid">Hybrid (Editable Text + Slide Visual)</option>
                 <option value="visual-slides">Full-Bleed High-DPI Slide Plates</option>
@@ -634,7 +669,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   max={15}
                   value={params.yTolerance || 4}
                   onChange={(e) => onChangeParam('yTolerance', Number(e.target.value))}
-                  className="w-full px-2.5 py-2 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
               <label className="flex items-center gap-2 text-xs">
@@ -656,7 +691,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.conformanceLevel || 'PDF/A-2b'}
                   onChange={(e) => onChangeParam('conformanceLevel', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="PDF/A-2b">ISO 19005-2 (PDF/A-2b)</option>
                   <option value="PDF/A-1b">ISO 19005-1 (PDF/A-1b)</option>
@@ -668,7 +703,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   type="text"
                   value={params.documentTitle || 'pdf tools Archival Record'}
                   onChange={(e) => onChangeParam('documentTitle', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 />
               </div>
             </>
@@ -682,7 +717,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.angle ?? 90}
                   onChange={(e) => onChangeParam('angle', Number(e.target.value))}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value={90}>90° Clockwise</option>
                   <option value={180}>180° Upside Down</option>
@@ -694,7 +729,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.targetFilter || 'all'}
                   onChange={(e) => onChangeParam('targetFilter', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="all">All Pages</option>
                   <option value="portrait">Portrait Pages Only</option>
@@ -710,11 +745,11 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           {tool.id === 'page-numbers' && (
             <>
               <div className="space-y-1.5">
-                <label className="text-xs font-semibold block">9-Point Position Grid</label>
+                <label className="text-xs font-semibold block">Position</label>
                 <select
                   value={params.position || 'bottom-right'}
                   onChange={(e) => onChangeParam('position', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="top-left">Top Left</option>
                   <option value="top-center">Top Center</option>
@@ -729,7 +764,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.template || 'Page {n} of {total}'}
                   onChange={(e) => onChangeParam('template', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="Page {n} of {total}">Page 1 of N</option>
                   <option value="Page {n}">Page 1</option>
@@ -739,23 +774,23 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-[11px] font-mono block">Start Page</label>
+                  <label className="text-[11px] font-mono block mb-1">Start Page</label>
                   <input
                     type="number"
                     min={1}
                     value={params.startFromPage || 1}
                     onChange={(e) => onChangeParam('startFromPage', Number(e.target.value))}
-                    className="w-full px-2 py-1.5 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                    className={`${INPUT_CLASS} font-mono`}
                   />
                 </div>
                 <div>
-                  <label className="text-[11px] font-mono block">First Number</label>
+                  <label className="text-[11px] font-mono block mb-1">First Number</label>
                   <input
                     type="number"
                     min={1}
                     value={params.firstNumber || 1}
                     onChange={(e) => onChangeParam('firstNumber', Number(e.target.value))}
-                    className="w-full px-2 py-1.5 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                    className={`${INPUT_CLASS} font-mono`}
                   />
                 </div>
               </div>
@@ -777,29 +812,29 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <label className="text-xs font-semibold block">Watermark Text</label>
                 <input
                   type="text"
-                  value={params.text || 'CONFIDENTIAL'}
+                  value={params.text ?? 'CONFIDENTIAL'}
                   onChange={(e) => onChangeParam('text', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-[11px] font-mono block">Placement</label>
+                  <label className="text-[11px] font-mono block mb-1">Placement</label>
                   <select
                     value={params.placement || 'single'}
                     onChange={(e) => onChangeParam('placement', e.target.value)}
-                    className="w-full px-2 py-1.5 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                    className={INPUT_CLASS}
                   >
                     <option value="single">Single Center</option>
-                    <option value="mosaic">Mosaic Tiled Grid</option>
+                    <option value="mosaic">Mosaic Tiled</option>
                   </select>
                 </div>
                 <div>
-                  <label className="text-[11px] font-mono block">Layer Order</label>
+                  <label className="text-[11px] font-mono block mb-1">Layer Order</label>
                   <select
                     value={params.layerOrder || 'over'}
                     onChange={(e) => onChangeParam('layerOrder', e.target.value)}
-                    className="w-full px-2 py-1.5 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                    className={INPUT_CLASS}
                   >
                     <option value="over">Over Content</option>
                     <option value="under">Under Content</option>
@@ -808,7 +843,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               </div>
               <div className="space-y-1">
                 <label className="text-[11px] font-mono block">
-                  Opacity ({Math.round((params.opacity ?? 0.22) * 100)}%) & Rotation ({params.rotation ?? -35}°)
+                  Opacity ({Math.round((params.opacity ?? 0.22) * 100)}%)
                 </label>
                 <input
                   type="range"
@@ -817,7 +852,35 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   step={0.05}
                   value={params.opacity ?? 0.22}
                   onChange={(e) => onChangeParam('opacity', Number(e.target.value))}
-                  className="w-full accent-zinc-900 dark:accent-zinc-100"
+                  className="w-full accent-[#202124] dark:accent-zinc-100"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[11px] font-mono block">
+                  Rotation ({params.rotation ?? -35}°)
+                </label>
+                <input
+                  type="range"
+                  min={-90}
+                  max={90}
+                  step={5}
+                  value={params.rotation ?? -35}
+                  onChange={(e) => onChangeParam('rotation', Number(e.target.value))}
+                  className="w-full accent-[#202124] dark:accent-zinc-100"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[11px] font-mono block">
+                  Font Size ({params.fontSize ?? 44} pt)
+                </label>
+                <input
+                  type="range"
+                  min={16}
+                  max={96}
+                  step={2}
+                  value={params.fontSize ?? 44}
+                  onChange={(e) => onChangeParam('fontSize', Number(e.target.value))}
+                  className="w-full accent-[#202124] dark:accent-zinc-100"
                 />
               </div>
               <div className="space-y-1">
@@ -844,14 +907,16 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               <div className="grid grid-cols-2 gap-2">
                 {(['top', 'bottom', 'left', 'right'] as const).map((side) => (
                   <div key={side}>
-                    <label className="text-[11px] font-mono uppercase block">{side} (pt)</label>
+                    <label className="text-[11px] font-mono uppercase block mb-1">
+                      {side} (pt)
+                    </label>
                     <input
                       type="number"
                       min={0}
-                      max={250}
+                      max={400}
                       value={params[side] ?? 36}
                       onChange={(e) => onChangeParam(side, Number(e.target.value))}
-                      className="w-full px-2 py-1.5 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                      className={`${INPUT_CLASS} font-mono`}
                     />
                   </div>
                 ))}
@@ -861,7 +926,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.applyTo || 'all'}
                   onChange={(e) => onChangeParam('applyTo', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="all">All Pages</option>
                   <option value="current">Current Active Page Only</option>
@@ -870,6 +935,26 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 </select>
               </div>
             </>
+          )}
+
+          {/* 24. Edit PDF */}
+          {tool.id === 'edit-pdf' && (
+            <div className="space-y-2">
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold block">Text Font Size (pt)</label>
+                <input
+                  type="number"
+                  min={8}
+                  max={48}
+                  value={params.fontSize || 14}
+                  onChange={(e) => onChangeParam('fontSize', Number(e.target.value))}
+                  className={`${INPUT_CLASS} font-mono`}
+                />
+              </div>
+              <p className="text-xs text-[#5f6368] leading-relaxed">
+                Select a tool above the page canvas (Text, Pen, Highlight, Box, Line, Note, or Stamp Image), draw or click on the page, drag placed items to reposition them, then click Execute &amp; Export.
+              </p>
+            </div>
           )}
 
           {/* 25. PDF Forms */}
@@ -893,7 +978,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 value={params.password || ''}
                 onChange={(e) => onChangeParam('password', e.target.value)}
                 placeholder="Enter document or .monopdf password..."
-                className="w-full px-2.5 py-2 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                className={`${INPUT_CLASS} font-mono`}
               />
             </div>
           )}
@@ -908,7 +993,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   value={params.password || ''}
                   onChange={(e) => onChangeParam('password', e.target.value)}
                   placeholder="Enter strong password..."
-                  className="w-full px-2.5 py-2 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
               <div className="space-y-1.5">
@@ -916,7 +1001,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.encryptionMode || 'protected-pdf'}
                   onChange={(e) => onChangeParam('encryptionMode', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="protected-pdf">Protected PDF + AES-256 Vault</option>
                   <option value="aes256-vault">AES-256-GCM .monopdf Vault Primary</option>
@@ -932,18 +1017,20 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <label className="text-xs font-semibold block">Signer Full Name</label>
                 <input
                   type="text"
-                  value={params.signerName || 'A. Mercer'}
+                  value={params.signerName || ''}
                   onChange={(e) => onChangeParam('signerName', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  placeholder="e.g. Jane Doe"
+                  className={INPUT_CLASS}
                 />
               </div>
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold block">Typed Signature Text</label>
                 <input
                   type="text"
-                  value={params.typedText || 'A. Mercer'}
+                  value={params.typedText || ''}
                   onChange={(e) => onChangeParam('typedText', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  placeholder="e.g. Jane Doe"
+                  className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
               <label className="flex items-center gap-2 text-xs">
@@ -984,8 +1071,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   type="text"
                   value={params.customSearchPattern || ''}
                   onChange={(e) => onChangeParam('customSearchPattern', e.target.value)}
-                  placeholder="e.g. Sovereign Capital"
-                  className="w-full px-2.5 py-2 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  placeholder="Enter exact text or regex..."
+                  className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
             </>
@@ -999,10 +1086,10 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.compareMode || 'semantic'}
                   onChange={(e) => onChangeParam('compareMode', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="semantic">Mode 1: Semantic Text Diff</option>
-                  <option value="visual">Mode 2: Visual Pixel Overlay (Difference)</option>
+                  <option value="visual">Mode 2: Visual Pixel Diff Overlay</option>
                 </select>
               </div>
               <div className="space-y-1.5">
@@ -1010,7 +1097,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.diffGranularity || 'words'}
                   onChange={(e) => onChangeParam('diffGranularity', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="words">Word-Level Diff</option>
                   <option value="lines">Line-Level Diff</option>
@@ -1021,10 +1108,16 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
           {/* 31. AI Summarizer & 32. Translate PDF Unified AI Engine Switch */}
           {(tool.id === 'ai-summarizer' || tool.id === 'translate-pdf') && (
-            <div className="p-3 bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800 space-y-3">
-              <div className="text-[11px] font-mono font-bold uppercase text-zinc-500">
-                DUAL AI ENGINE ARCHITECTURE
+            <div className="p-3.5 rounded-2xl bg-[#f8f9fa] dark:bg-zinc-900 border border-[#dadce0] dark:border-zinc-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-[#5f6368]">
+                  AI EXECUTION ENGINE
+                </span>
+                <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full bg-white dark:bg-zinc-800 border border-[#dadce0] dark:border-zinc-700">
+                  {cloudAiStatus.configured ? 'Gemini Ready' : 'Key Not Set'}
+                </span>
               </div>
+
               <select
                 aria-label="AI Engine Mode"
                 value={aiSettings.mode}
@@ -1034,23 +1127,39 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                     mode: e.target.value as AiEngineSettings['mode'],
                   }))
                 }
-                className="w-full px-2.5 py-2 text-xs bg-zinc-50 dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-800"
+                className={INPUT_CLASS}
               >
-                <option value="offline-extractive">
-                  (b) Offline Deterministic TF-IDF Engine
+                <option value="cloud-gemini">
+                  Cloud AI (Gemini via Server Secret)
                 </option>
                 <option value="ollama-local">
-                  (a) 100% Offline Local AI (Ollama)
+                  Local AI (Ollama on localhost:11434)
                 </option>
-                <option value="cloud-gemini">
-                  (c) Cloud AI (Gemini Server Proxy)
+                <option value="offline-extractive">
+                  Offline Extractive (No API Key · Summarizer only)
                 </option>
               </select>
+
+              {aiSettings.mode === 'cloud-gemini' && (
+                <p className="text-[11px] leading-relaxed text-[#5f6368] dark:text-zinc-400">
+                  {cloudAiStatus.configured
+                    ? `Connected to server-side Gemini proxy (${cloudAiStatus.model}). API key stays private on the server.`
+                    : 'Server GEMINI_API_KEY is not configured yet. Add GEMINI_API_KEY in Settings > Secrets to enable Cloud AI, or switch to Local Ollama / Offline Extractive mode.'}
+                </p>
+              )}
+
+              {aiSettings.mode === 'offline-extractive' && (
+                <p className="text-[11px] leading-relaxed text-[#5f6368] dark:text-zinc-400">
+                  {tool.id === 'translate-pdf'
+                    ? 'Full document translation requires an LLM. Switch to Cloud AI (Gemini) or Local Ollama above.'
+                    : 'Runs 100% locally in your browser using deterministic TF-IDF sentence ranking and action-item extraction—no API key required.'}
+                </p>
+              )}
 
               {aiSettings.mode === 'ollama-local' && (
                 <div className="space-y-2 pt-1">
                   <div>
-                    <label className="text-[10px] font-mono block text-zinc-500">
+                    <label className="text-[10px] font-mono block text-[#5f6368] mb-1">
                       OLLAMA MODEL NAME
                     </label>
                     <input
@@ -1063,15 +1172,15 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                         }))
                       }
                       placeholder="llama3.2, qwen2.5, mistral"
-                      className="w-full px-2 py-1 text-xs font-mono bg-zinc-50 dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-800"
+                      className={`${INPUT_CLASS} font-mono`}
                     />
                   </div>
                   <div className="flex items-center justify-between text-[11px] font-mono">
-                    <span className="truncate text-zinc-500">{ollamaStatus}</span>
+                    <span className="truncate text-[#5f6368]">{ollamaStatus}</span>
                     <button
                       type="button"
                       onClick={probeOllama}
-                      className="px-2 py-0.5 border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                      className="px-2.5 py-1 rounded-full border border-[#dadce0] dark:border-zinc-700 hover:bg-white dark:hover:bg-zinc-800 cursor-pointer"
                     >
                       Probe
                     </button>
@@ -1087,7 +1196,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               <select
                 value={params.summaryLength || 'medium'}
                 onChange={(e) => onChangeParam('summaryLength', e.target.value)}
-                className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                className={INPUT_CLASS}
               >
                 <option value="short">Short Executive Brief (3 Sentences)</option>
                 <option value="medium">Standard Dossier (5 Sentences)</option>
@@ -1103,11 +1212,20 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <select
                   value={params.targetLanguage || 'Spanish'}
                   onChange={(e) => onChangeParam('targetLanguage', e.target.value)}
-                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   <option value="Spanish">Spanish</option>
                   <option value="French">French</option>
                   <option value="German">German</option>
+                  <option value="Italian">Italian</option>
+                  <option value="Portuguese">Portuguese</option>
+                  <option value="Chinese (Simplified)">Chinese (Simplified)</option>
+                  <option value="Japanese">Japanese</option>
+                  <option value="Korean">Korean</option>
+                  <option value="Arabic">Arabic</option>
+                  <option value="Hindi">Hindi</option>
+                  <option value="Russian">Russian</option>
+                  <option value="Dutch">Dutch</option>
                 </select>
               </div>
               <label className="flex items-center gap-2 text-xs">
@@ -1146,7 +1264,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
         {/* Error Banner */}
         {errorMessage && (
-          <div className="p-3 bg-zinc-900 text-zinc-50 dark:bg-zinc-100 dark:text-zinc-950 text-xs font-mono flex items-start gap-2">
+          <div className="p-3.5 rounded-2xl bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950 text-xs leading-relaxed flex items-start gap-2.5">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{errorMessage}</span>
           </div>
@@ -1154,9 +1272,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
         {/* OUTPUT RESULT & "CHAIN TO NEXT TOOL ->" CARD */}
         {lastOutput && (
-          <div className="p-3.5 bg-white dark:bg-zinc-900 border-2 border-zinc-900 dark:border-zinc-100 space-y-3">
+          <div className="p-4 rounded-2xl bg-white dark:bg-zinc-900 border-2 border-[#202124] dark:border-zinc-100 space-y-3">
             <div className="flex items-center justify-between">
-              <span className="flex items-center gap-1.5 text-xs font-bold text-zinc-950 dark:text-zinc-50">
+              <span className="flex items-center gap-1.5 text-xs font-bold text-[#202124] dark:text-zinc-50">
                 <CheckCircle2 className="w-4 h-4" />
                 <span>OUTPUT READY</span>
               </span>
@@ -1167,28 +1285,28 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               )}
             </div>
 
-            <p className="text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
+            <p className="text-xs text-[#5f6368] dark:text-zinc-400 leading-relaxed">
               {lastOutput.summaryMessage}
             </p>
 
             {/* Before / After Byte Telemetry */}
-            <div className="grid grid-cols-2 gap-2 p-2 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 text-[11px] font-mono tabular-nums">
+            <div className="grid grid-cols-2 gap-2 p-2.5 rounded-xl bg-[#f8f9fa] dark:bg-zinc-950 border border-[#dadce0] dark:border-zinc-800 text-[11px] font-mono tabular-nums">
               <div>
-                <div className="text-zinc-400">BEFORE</div>
+                <div className="text-[#5f6368]">BEFORE</div>
                 <div className="font-semibold">{formatBytes(lastOutput.beforeSize)}</div>
               </div>
               <div>
-                <div className="text-zinc-400">AFTER</div>
+                <div className="text-[#5f6368]">AFTER</div>
                 <div className="font-semibold">{formatBytes(lastOutput.afterSize)}</div>
               </div>
             </div>
 
             {/* Optional Inspector Report Key-Values */}
             {lastOutput.report && (
-              <div className="space-y-1 pt-1 border-t border-zinc-200 dark:border-zinc-800 text-[11px] font-mono">
+              <div className="space-y-1 pt-1 border-t border-[#dadce0] dark:border-zinc-800 text-[11px] font-mono">
                 {Object.entries(lastOutput.report).map(([k, v]) => (
                   <div key={k} className="flex items-center justify-between gap-2">
-                    <span className="text-zinc-500 truncate">{k}:</span>
+                    <span className="text-[#5f6368] truncate">{k}:</span>
                     <span className="font-semibold text-right truncate">{String(v)}</span>
                   </div>
                 ))}
@@ -1199,16 +1317,28 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             <button
               type="button"
               onClick={onDownloadOutput}
-              className="w-full py-2 px-3 flex items-center justify-center gap-2 text-xs font-bold bg-zinc-950 text-zinc-50 dark:bg-zinc-100 dark:text-zinc-950 hover:opacity-90 transition-opacity"
+              className="w-full py-2.5 px-3 rounded-full flex items-center justify-center gap-2 text-xs font-bold bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950 hover:opacity-90 transition-opacity cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" />
               <span className="truncate">Download {lastOutput.filename}</span>
             </button>
 
-            {/* Secondary File Downloads (e.g. .txt transcript, individual split PDFs, .monopdf vault) */}
+            {/* Instant Preview in Built-in PDF Reader */}
+            {lastOutput.canChainAsPdf && (
+              <button
+                type="button"
+                onClick={() => onChainToTool('pdf-reader')}
+                className="w-full py-2 px-3 rounded-full flex items-center justify-center gap-2 text-xs font-semibold border border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>Preview in PDF Reader</span>
+              </button>
+            )}
+
+            {/* Secondary File Downloads */}
             {lastOutput.secondaryFiles && lastOutput.secondaryFiles.length > 0 && (
-              <div className="space-y-1 pt-1">
-                <div className="text-[10px] font-mono text-zinc-500 uppercase">
+              <div className="space-y-1.5 pt-1">
+                <div className="text-[10px] font-mono text-[#5f6368] uppercase">
                   COMPANION OUTPUT FILES ({lastOutput.secondaryFiles.length})
                 </div>
                 <div className="max-h-28 overflow-y-auto space-y-1">
@@ -1217,10 +1347,10 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                       key={sec.filename}
                       type="button"
                       onClick={() => onDownloadSecondary(idx)}
-                      className="w-full px-2.5 py-1.5 text-[11px] font-mono flex items-center justify-between border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                      className="w-full px-3 py-1.5 rounded-xl text-[11px] font-mono flex items-center justify-between border border-[#dadce0] dark:border-zinc-700 hover:bg-[#f1f3f4] dark:hover:bg-zinc-800 cursor-pointer"
                     >
                       <span className="truncate">{sec.filename}</span>
-                      <span className="shrink-0 ml-2 text-zinc-400">
+                      <span className="shrink-0 ml-2 text-[#5f6368]">
                         {formatBytes(sec.bytes.byteLength)}
                       </span>
                     </button>
@@ -1231,15 +1361,15 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
             {/* CHAIN TO NEXT TOOL -> */}
             {lastOutput.canChainAsPdf && (
-              <div className="pt-2.5 border-t border-zinc-200 dark:border-zinc-800 space-y-2">
-                <label className="text-[10px] font-mono uppercase text-zinc-500 block">
-                  PIPELINE CHAIN OUTPUT UINT8ARRAY TO:
+              <div className="pt-2.5 border-t border-[#dadce0] dark:border-zinc-800 space-y-2">
+                <label className="text-[10px] font-mono uppercase text-[#5f6368] block">
+                  CHAIN OUTPUT PDF TO:
                 </label>
                 <select
                   aria-label="Select Next Tool in Chain"
                   value={nextChainToolId}
                   onChange={(e) => setNextChainToolId(e.target.value as ToolId)}
-                  className="w-full px-2 py-1.5 text-xs bg-zinc-50 dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-800"
+                  className={INPUT_CLASS}
                 >
                   {chainableTools.map((ct) => (
                     <option key={ct.id} value={ct.id}>
@@ -1250,7 +1380,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <button
                   type="button"
                   onClick={() => onChainToTool(nextChainToolId)}
-                  className="w-full py-2 px-3 flex items-center justify-center gap-1.5 text-xs font-semibold border border-zinc-900 dark:border-zinc-100 text-zinc-900 dark:text-zinc-100 hover:bg-zinc-900 hover:text-zinc-50 dark:hover:bg-zinc-100 dark:hover:text-zinc-950 transition-colors"
+                  className="w-full py-2 px-3 rounded-full flex items-center justify-center gap-1.5 text-xs font-semibold border border-[#202124] dark:border-zinc-100 text-[#202124] dark:text-zinc-100 hover:bg-[#202124] hover:text-white dark:hover:bg-zinc-100 dark:hover:text-zinc-950 transition-colors cursor-pointer"
                 >
                   <span>Chain to Next Tool</span>
                   <ArrowRight className="w-3.5 h-3.5" />
@@ -1263,12 +1393,12 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
       {/* Primary Execute Footer Button */}
       {tool.id !== 'pdf-reader' && (
-        <div className="p-4 border-t border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#09090b]">
+        <div className="p-4 border-t border-[#dadce0] dark:border-zinc-800 bg-white dark:bg-[#161b22]">
           <button
             type="button"
             disabled={isProcessing}
             onClick={onExecute}
-            className="w-full py-2.5 px-4 flex items-center justify-center gap-2 text-xs font-bold bg-zinc-950 text-zinc-50 dark:bg-zinc-100 dark:text-zinc-950 disabled:opacity-50 hover:opacity-90 transition-opacity"
+            className="w-full py-3 px-4 rounded-full flex items-center justify-center gap-2 text-xs font-bold bg-[#202124] text-white dark:bg-zinc-100 dark:text-zinc-950 disabled:opacity-50 hover:opacity-90 transition-opacity cursor-pointer"
           >
             {isProcessing ? (
               <>
@@ -1278,7 +1408,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             ) : (
               <>
                 <Play className="w-3.5 h-3.5" />
-                <span>Execute & Export ({tool.shortName})</span>
+                <span>Execute &amp; Export ({tool.shortName})</span>
               </>
             )}
           </button>

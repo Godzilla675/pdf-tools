@@ -169,11 +169,14 @@ export async function executeProtectPdf(
   file: UploadedFileItem,
   params: Record<string, any>
 ): Promise<EngineOutput> {
-  const password = String(params.password || 'mono-secure-2026');
+  const password = String(params.password || '').trim();
+  if (!password) {
+    throw new Error('Please enter a password before protecting the PDF.');
+  }
   const pdfDoc = await PDFDocument.load(file.bytes, { ignoreEncryption: true });
   const keyHash = await computeSha256Hex(new TextEncoder().encode(password));
 
-  pdfDoc.setProducer('MONO PDF Cryptographic Security Engine');
+  pdfDoc.setProducer('pdf tools Cryptographic Security Engine');
   pdfDoc.setKeywords([
     'PROTECTED',
     `SHA256:${keyHash.slice(0, 16)}`,
@@ -266,8 +269,8 @@ export async function executeSignPdf(
   const fontMono = await pdfDoc.embedFont(StandardFonts.Courier);
 
   const pages = pdfDoc.getPages();
-  const signerName = String(params.signerName || 'A. Mercer');
-  const signerTitle = String(params.signerTitle || 'Authorized Signatory');
+  const signerName = String(params.signerName || params.typedText || 'Authorized Signer').trim();
+  const signerTitle = String(params.signerTitle || 'Signatory').trim();
   const nowIso = new Date().toISOString();
 
   // Embed signature image if provided
@@ -349,7 +352,7 @@ export async function executeSignPdf(
       color: rgb(0.98, 0.98, 0.98),
     });
 
-    auditPage.drawText('MONO PDF OFFLINE PKI & SHA-256 VERIFICATION RECORD', {
+    auditPage.drawText('PDF TOOLS OFFLINE PKI & SHA-256 VERIFICATION RECORD', {
       x: 56,
       y: height - 84,
       size: 8.5,
@@ -458,8 +461,11 @@ function drawSignatureBlock(
   });
 
   if (opts.embeddedSigImg) {
-    const imgW = Math.min(w - 16, 130);
-    const imgH = Math.min(h - 24, 36);
+    const maxW = w - 16;
+    const maxH = Math.max(18, h - 28);
+    const scale = Math.min(maxW / opts.embeddedSigImg.width, maxH / opts.embeddedSigImg.height);
+    const imgW = opts.embeddedSigImg.width * scale;
+    const imgH = opts.embeddedSigImg.height * scale;
     page.drawImage(opts.embeddedSigImg, {
       x: x + 8,
       y: y + h - imgH - 6,
@@ -611,15 +617,67 @@ export async function executeComparePdf(
     diffCanvas.width = w;
     diffCanvas.height = h;
     const ctx = diffCanvas.getContext('2d')!;
-
-    ctx.fillStyle = '#000000';
+    // Build a readable white-background diff plate highlighting changed pixels in high-contrast ink
+    ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, w, h);
 
-    if (canA) ctx.drawImage(canA, 0, 0);
-    if (canB) {
-      ctx.globalCompositeOperation = 'difference';
+    if (canA && canB) {
+      const tmpA = document.createElement('canvas');
+      tmpA.width = w;
+      tmpA.height = h;
+      const ctxA = tmpA.getContext('2d')!;
+      ctxA.fillStyle = '#ffffff';
+      ctxA.fillRect(0, 0, w, h);
+      ctxA.drawImage(canA, 0, 0);
+
+      const tmpB = document.createElement('canvas');
+      tmpB.width = w;
+      tmpB.height = h;
+      const ctxB = tmpB.getContext('2d')!;
+      ctxB.fillStyle = '#ffffff';
+      ctxB.fillRect(0, 0, w, h);
+      ctxB.drawImage(canB, 0, 0);
+
+      const dataA = ctxA.getImageData(0, 0, w, h).data;
+      const dataB = ctxB.getImageData(0, 0, w, h).data;
+      const outImg = ctx.createImageData(w, h);
+      const out = outImg.data;
+
+      for (let i = 0; i < out.length; i += 4) {
+        const diff =
+          Math.abs(dataA[i] - dataB[i]) +
+          Math.abs(dataA[i + 1] - dataB[i + 1]) +
+          Math.abs(dataA[i + 2] - dataB[i + 2]);
+        if (diff > 35) {
+          // Changed pixel -> crisp dark highlight (red-tinted dark ink for Doc B vs Doc A)
+          const lumA = dataA[i] + dataA[i + 1] + dataA[i + 2];
+          const lumB = dataB[i] + dataB[i + 1] + dataB[i + 2];
+          if (lumB < lumA) {
+            // Added in B -> strong crimson
+            out[i] = 210;
+            out[i + 1] = 35;
+            out[i + 2] = 45;
+            out[i + 3] = 255;
+          } else {
+            // Removed from A -> deep slate blue
+            out[i] = 35;
+            out[i + 1] = 95;
+            out[i + 2] = 210;
+            out[i + 3] = 255;
+          }
+        } else {
+          // Unchanged pixel -> faded light context so user can read where the diff sits
+          out[i] = Math.round(255 - (255 - dataA[i]) * 0.25);
+          out[i + 1] = Math.round(255 - (255 - dataA[i + 1]) * 0.25);
+          out[i + 2] = Math.round(255 - (255 - dataA[i + 2]) * 0.25);
+          out[i + 3] = 255;
+        }
+      }
+      ctx.putImageData(outImg, 0, 0);
+    } else if (canA) {
+      ctx.drawImage(canA, 0, 0);
+    } else if (canB) {
       ctx.drawImage(canB, 0, 0);
-      ctx.globalCompositeOperation = 'source-over';
     }
     visualOverlayDataUrls.push(diffCanvas.toDataURL('image/png'));
   }

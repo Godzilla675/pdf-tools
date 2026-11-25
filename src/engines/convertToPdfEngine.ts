@@ -1,8 +1,12 @@
-import { PDFDocument, PDFFont, StandardFonts, rgb } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import mammoth from 'mammoth';
-import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
 import { EngineOutput, UploadedFileItem } from '../types/pdf';
+import {
+  detectMarkupFormat,
+  renderHtmlOrMarkdownToPdf,
+} from '../utils/htmlPdfRenderer';
+import { renderPptxToExactPdf } from '../utils/pptxToPdfRenderer';
 
 /**
  * Helper to decode any image format (JPG, PNG, WEBP, GIF, BMP, SVG) into JPEG/PNG bytes via HTML5 Canvas
@@ -13,7 +17,6 @@ async function normalizeImageToEmbeddableBytes(
 ): Promise<{ bytes: Uint8Array; isPng: boolean; width: number; height: number }> {
   const ext = file.name.split('.').pop()?.toLowerCase() || '';
   if (ext === 'jpg' || ext === 'jpeg' || file.type === 'image/jpeg') {
-    // Also read dimensions via Image if in browser
     if (typeof document !== 'undefined') {
       try {
         const dims = await getImageDimensions(file.bytes, 'image/jpeg');
@@ -84,7 +87,8 @@ async function getImageDimensions(
   try {
     return await new Promise((resolve, reject) => {
       const img = new Image();
-      img.onload = () => resolve({ width: img.naturalWidth || img.width, height: img.naturalHeight || img.height });
+      img.onload = () =>
+        resolve({ width: img.naturalWidth || img.width, height: img.naturalHeight || img.height });
       img.onerror = reject;
       img.src = url;
     });
@@ -108,8 +112,7 @@ export async function executeImagesToPdf(
 
   const pdfDoc = await PDFDocument.create();
   const beforeSize = files.reduce((s, f) => s + f.bytes.byteLength, 0);
-  const marginPt =
-    params.margin === 'none' ? 0 : params.margin === 'large' ? 50 : 20;
+  const marginPt = params.margin === 'none' ? 0 : params.margin === 'large' ? 50 : 20;
 
   for (const file of files) {
     const normalized = await normalizeImageToEmbeddableBytes(file);
@@ -174,57 +177,42 @@ export async function executeImagesToPdf(
 }
 
 /**
- * Helper to word-wrap a paragraph of text to fit within maxWidth in points.
- */
-function wrapTextLines(text: string, font: PDFFont, fontSize: number, maxWidth: number): string[] {
-  const safe = text.replace(/[^\x20-\x7E\xA0-\xFF]/g, ' ').trim();
-  if (!safe) return [''];
-  const words = safe.split(/\s+/);
-  const lines: string[] = [];
-  let current = '';
-
-  for (const word of words) {
-    const candidate = current ? `${current} ${word}` : word;
-    const width = font.widthOfTextAtSize(candidate, fontSize);
-    if (width <= maxWidth || !current) {
-      current = candidate;
-    } else {
-      lines.push(current);
-      current = word;
-    }
-  }
-  if (current) lines.push(current);
-  return lines;
-}
-
-/**
  * Tool 11: WORD to PDF (.docx -> .pdf)
- * Parses .docx files offline using Mammoth to extract structured HTML/text, headings, lists,
- * and paginates them into a multi-page pdf-lib document.
+ * Parses .docx files offline using Mammoth to extract rich HTML (headings, bold/italic, lists,
+ * tables, and embedded images) and renders it via our real browser HTML-to-PDF engine.
  */
 export async function executeWordToPdf(
   file: UploadedFileItem,
   params: Record<string, any>
 ): Promise<EngineOutput> {
-  let extractedHtml = '';
-  let extractedRawText = '';
+  const ext = file.name.split('.').pop()?.toLowerCase() || '';
+  if (ext === 'doc') {
+    throw new Error(
+      'Legacy binary .doc files are not supported offline. Please save as .docx in Word / Google Docs and upload the .docx file.'
+    );
+  }
 
+  let extractedHtml = '';
   try {
     const arrayBuffer = file.bytes.buffer.slice(
       file.bytes.byteOffset,
       file.bytes.byteOffset + file.bytes.byteLength
     ) as ArrayBuffer;
     const htmlRes = await mammoth.convertToHtml({ arrayBuffer });
-    extractedHtml = htmlRes.value || '';
-    const rawRes = await mammoth.extractRawText({ arrayBuffer });
-    extractedRawText = rawRes.value || '';
-  } catch {
-    extractedRawText = new TextDecoder().decode(file.bytes);
+    extractedHtml = (htmlRes.value || '').trim();
+  } catch (err: any) {
+    throw new Error(
+      `Could not parse "${file.name}" as a valid Word (.docx) archive (${err?.message || 'invalid file'}).`
+    );
   }
 
-  return await renderStructuredMarkupToPdf(
-    extractedHtml || extractedRawText,
-    extractedHtml ? 'html' : 'markdown',
+  if (!extractedHtml) {
+    throw new Error(`No readable document content found inside "${file.name}".`);
+  }
+
+  return await renderHtmlOrMarkdownToPdf(
+    extractedHtml,
+    'html',
     file.name.replace(/\.(docx|doc)$/i, '') + '.pdf',
     file.bytes.byteLength,
     params
@@ -233,146 +221,40 @@ export async function executeWordToPdf(
 
 /**
  * Tool 12: POWERPOINT to PDF (.pptx -> .pdf)
- * Unzips .pptx archives in memory using JSZip, parses ppt/slides/slide*.xml text and media relationships,
- * and renders each slide onto a 16:9 landscape PDF page (960 x 540 pt).
+ * Full OOXML layout renderer: preserves exact slide dimensions, slide master/layout inheritance,
+ * theme colors/fonts, gradients, shapes/connectors, cropped images, tables, charts, typography,
+ * and embeds an invisible searchable PDF text layer.
  */
 export async function executePowerpointToPdf(
   file: UploadedFileItem,
-  params: Record<string, any>
+  params: Record<string, any>,
+  onProgress?: (msg: string) => void
 ): Promise<EngineOutput> {
-  const pdfDoc = await PDFDocument.create();
-  const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  const fontMono = await pdfDoc.embedFont(StandardFonts.Courier);
-
-  const isDark = params.theme === 'dark';
-  const slideW = 960;
-  const slideH = 540;
-
-  let slideTexts: { slideNumber: number; paragraphs: string[] }[] = [];
-
-  try {
-    const zip = await JSZip.loadAsync(file.bytes);
-    const slideFiles = Object.keys(zip.files)
-      .filter((k) => /^ppt\/slides\/slide\d+\.xml$/i.test(k))
-      .sort((a, b) => {
-        const na = parseInt(a.match(/slide(\d+)\.xml/i)?.[1] || '0', 10);
-        const nb = parseInt(b.match(/slide(\d+)\.xml/i)?.[1] || '0', 10);
-        return na - nb;
-      });
-
-    for (let i = 0; i < slideFiles.length; i++) {
-      const xml = await zip.files[slideFiles[i]].async('string');
-      // Parse paragraph blocks <a:p> and text runs <a:t>
-      const pBlocks = xml.split(/<\/a:p>/i);
-      const paragraphs: string[] = [];
-      for (const block of pBlocks) {
-        const matches = Array.from(block.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/gi));
-        if (matches.length > 0) {
-          const textLine = matches
-            .map((m) =>
-              m[1]
-                .replace(/&amp;/g, '&')
-                .replace(/&lt;/g, '<')
-                .replace(/&gt;/g, '>')
-                .replace(/&quot;/g, '"')
-                .replace(/&#39;/g, "'")
-            )
-            .join('')
-            .trim();
-          if (textLine) paragraphs.push(textLine);
-        }
-      }
-      slideTexts.push({ slideNumber: i + 1, paragraphs });
-    }
-  } catch {
-    const fallbackText = new TextDecoder().decode(file.bytes);
-    slideTexts = [{ slideNumber: 1, paragraphs: fallbackText.split('\n').filter(Boolean) }];
+  const ext = file.name.split('.').pop()?.toLowerCase() || '';
+  if (ext === 'ppt') {
+    throw new Error(
+      'Legacy binary .ppt files are not supported offline. Please save your presentation as .pptx in PowerPoint, Keynote, or Google Slides and upload the .pptx file.'
+    );
   }
-
-  if (slideTexts.length === 0) {
-    slideTexts = [
-      {
-        slideNumber: 1,
-        paragraphs: [file.name, 'Presentation converted via MONO PDF Offline PPTX Engine'],
-      },
-    ];
-  }
-
-  for (const slide of slideTexts) {
-    const page = pdfDoc.addPage([slideW, slideH]);
-    page.drawRectangle({
-      x: 0,
-      y: 0,
-      width: slideW,
-      height: slideH,
-      color: isDark ? rgb(0.06, 0.06, 0.07) : rgb(0.99, 0.99, 0.99),
-    });
-
-    // Top structural hairline
-    page.drawRectangle({
-      x: 48,
-      y: slideH - 42,
-      width: slideW - 96,
-      height: 1.5,
-      color: isDark ? rgb(0.25, 0.25, 0.28) : rgb(0.12, 0.12, 0.14),
-    });
-
-    let y = slideH - 90;
-    slide.paragraphs.forEach((para, idx) => {
-      const isTitle = idx === 0;
-      const fSize = isTitle ? 28 : 16;
-      const activeFont = isTitle ? fontBold : fontRegular;
-      const lines = wrapTextLines(para, activeFont, fSize, slideW - 110);
-
-      for (const line of lines) {
-        if (y < 55) break;
-        page.drawText(line, {
-          x: isTitle ? 48 : 64,
-          y,
-          size: fSize,
-          font: activeFont,
-          color: isDark ? rgb(0.95, 0.95, 0.96) : rgb(0.08, 0.08, 0.1),
-        });
-        y -= fSize * 1.45;
-      }
-      y -= isTitle ? 18 : 8;
-    });
-
-    if (params.includeSlideNumbers !== false) {
-      page.drawText(`SLIDE ${String(slide.slideNumber).padStart(2, '0')} / ${String(slideTexts.length).padStart(2, '0')}`, {
-        x: slideW - 140,
-        y: 24,
-        size: 10,
-        font: fontMono,
-        color: rgb(0.5, 0.5, 0.52),
-      });
-    }
-  }
-
-  const outBytes = await pdfDoc.save({ useObjectStreams: true });
-  return {
-    bytes: outBytes,
-    filename: `${file.name.replace(/\.(pptx|ppt)$/i, '')}_slides.pdf`,
-    mimeType: 'application/pdf',
-    beforeSize: file.bytes.byteLength,
-    afterSize: outBytes.byteLength,
-    pageCount: pdfDoc.getPageCount(),
-    canChainAsPdf: true,
-    summaryMessage: `Rendered ${pdfDoc.getPageCount()} 16:9 presentation slide(s) to PDF.`,
-  };
+  return await renderPptxToExactPdf(file.bytes, file.name, params, onProgress);
 }
 
 /**
  * Tool 13: EXCEL to PDF (.xlsx, .xls, .csv -> .pdf)
- * Parses spreadsheets using SheetJS (xlsx) and draws formatted monochrome data tables
- * with headers and cell borders across paginated PDF sheets.
+ * Parses spreadsheets using SheetJS (xlsx) and draws proportionally auto-sized monochrome data tables
+ * with headers, gridlines, and page-break header repetition across paginated PDF sheets.
  */
 export async function executeExcelToPdf(
   file: UploadedFileItem,
   params: Record<string, any>
 ): Promise<EngineOutput> {
-  const workbook = XLSX.read(file.bytes, { type: 'array' });
+  let workbook: XLSX.WorkBook;
+  try {
+    workbook = XLSX.read(file.bytes, { type: 'array' });
+  } catch (err: any) {
+    throw new Error(`Could not parse spreadsheet "${file.name}": ${err?.message || 'Invalid format'}`);
+  }
+
   const pdfDoc = await PDFDocument.create();
   const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
   const fontMono = await pdfDoc.embedFont(StandardFonts.Courier);
@@ -384,19 +266,37 @@ export async function executeExcelToPdf(
 
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, defval: '' });
+    const rows = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1, defval: '' });
     if (rows.length === 0) continue;
 
-    const maxCols = Math.max(1, ...rows.map((r) => r.length));
+    const numCols = Math.min(Math.max(1, ...rows.map((r) => r.length)), 14);
     const tableW = pageW - margin * 2;
-    const colW = tableW / Math.min(maxCols, 12);
+
+    // Auto-calculate proportional column widths based on max text lengths in each column
+    const colCharWeights = new Array<number>(numCols).fill(6);
+    for (let r = 0; r < Math.min(rows.length, 200); r++) {
+      for (let c = 0; c < numCols; c++) {
+        const len = String(rows[r]?.[c] ?? '').trim().length;
+        colCharWeights[c] = Math.min(36, Math.max(colCharWeights[c], len + 2));
+      }
+    }
+    const totalWeight = colCharWeights.reduce((a, b) => a + b, 0);
+    const colWidths = colCharWeights.map((w) => (w / totalWeight) * tableW);
+    const colOffsets: number[] = [];
+    let runningX = margin;
+    for (let c = 0; c < numCols; c++) {
+      colOffsets.push(runningX);
+      runningX += colWidths[c];
+    }
+
     const rowH = 20;
+    const fontSize = numCols > 10 ? 7.5 : 8.5;
 
     let page = pdfDoc.addPage([pageW, pageH]);
-    let y = pageH - margin - 20;
+    let y = pageH - margin - 18;
 
-    // Sheet Title
-    page.drawText(`SHEET: ${sheetName.toUpperCase()}`, {
+    const safeSheetTitle = sheetName.replace(/[^\x20-\x7E]/g, ' ').toUpperCase();
+    page.drawText(`SHEET: ${safeSheetTitle}`, {
       x: margin,
       y,
       size: 12,
@@ -427,16 +327,34 @@ export async function executeExcelToPdf(
         });
       }
 
-      const numCols = Math.min(rowCells.length, 12);
       for (let c = 0; c < numCols; c++) {
-        const cellVal = String(rowCells[c] ?? '').replace(/[^\x20-\x7E]/g, ' ').trim();
-        const maxChars = Math.max(4, Math.floor((colW - 8) / 5.5));
-        const clipped = cellVal.length > maxChars ? cellVal.slice(0, maxChars - 1) + '…' : cellVal;
+        if (!isHeader && params.showGridlines !== false && c > 0) {
+          page.drawLine({
+            start: { x: colOffsets[c], y: y - 4 },
+            end: { x: colOffsets[c], y: y - 4 + rowH },
+            thickness: 0.4,
+            color: rgb(0.86, 0.86, 0.88),
+          });
+        }
+
+        const cellVal = String(rowCells?.[c] ?? '')
+          .replace(/[^\x20-\x7E\xA0-\xFF]/g, ' ')
+          .trim();
+        const activeFont = isHeader ? fontBold : fontMono;
+        const availW = Math.max(12, colWidths[c] - 8);
+        let clipped = cellVal;
+        while (clipped.length > 1 && activeFont.widthOfTextAtSize(clipped, fontSize) > availW) {
+          clipped = clipped.slice(0, -1);
+        }
+        if (clipped.length < cellVal.length && clipped.length > 2) {
+          clipped = clipped.slice(0, -2) + '..';
+        }
+
         page.drawText(clipped, {
-          x: margin + c * colW + 5,
+          x: colOffsets[c] + 4,
           y: y + 2,
-          size: 8.5,
-          font: isHeader ? fontBold : fontMono,
+          size: fontSize,
+          font: activeFont,
           color: isHeader ? rgb(0.98, 0.98, 0.98) : rgb(0.12, 0.12, 0.14),
         });
       }
@@ -456,7 +374,7 @@ export async function executeExcelToPdf(
   }
 
   if (pdfDoc.getPageCount() === 0) {
-    pdfDoc.addPage([pageW, pageH]);
+    throw new Error(`No worksheet rows found inside "${file.name}".`);
   }
 
   const outBytes = await pdfDoc.save({ useObjectStreams: true });
@@ -473,7 +391,7 @@ export async function executeExcelToPdf(
 }
 
 /**
- * Shared structured HTML / Markdown vector PDF compiler for Tools 11 & 14.
+ * Shared HTML / Markdown renderer export for AI tools & Word to PDF.
  */
 export async function renderStructuredMarkupToPdf(
   content: string,
@@ -482,168 +400,41 @@ export async function renderStructuredMarkupToPdf(
   beforeSize: number,
   params: Record<string, any>
 ): Promise<EngineOutput> {
-  const pdfDoc = await PDFDocument.create();
-  const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  const fontMono = await pdfDoc.embedFont(StandardFonts.Courier);
-
-  const pageW = params.pageSize === 'Letter' ? 612 : 595.28;
-  const pageH = params.pageSize === 'Letter' ? 792 : 841.89;
-  const margin = 48;
-  const maxW = pageW - margin * 2;
-  const baseFontSize = Number(params.fontSize || 11);
-
-  // Normalize HTML tags into Markdown-like structural lines if format is HTML
-  let normalizedText = content || '';
-  if (format === 'html' || /<\/?[a-z][\s\S]*>/i.test(normalizedText)) {
-    normalizedText = normalizedText
-      .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n')
-      .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n')
-      .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n### $1\n')
-      .replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '\n- $1')
-      .replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '\n$1\n')
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<[^>]+>/g, '')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>');
-  }
-
-  let page = pdfDoc.addPage([pageW, pageH]);
-  let y = pageH - margin;
-
-  const ensureSpace = (needed: number) => {
-    if (y - needed < margin) {
-      page = pdfDoc.addPage([pageW, pageH]);
-      y = pageH - margin;
-    }
-  };
-
-  const rawLines = normalizedText.split(/\r?\n/);
-
-  for (const rawLine of rawLines) {
-    const trimmed = rawLine.trim();
-    if (!trimmed) {
-      y -= baseFontSize * 0.65;
-      continue;
-    }
-
-    if (trimmed.startsWith('# ')) {
-      const size = baseFontSize * 1.75;
-      ensureSpace(size * 2);
-      y -= 8;
-      const lines = wrapTextLines(trimmed.slice(2), fontBold, size, maxW);
-      for (const l of lines) {
-        ensureSpace(size * 1.35);
-        page.drawText(l, { x: margin, y, size, font: fontBold, color: rgb(0.05, 0.05, 0.06) });
-        y -= size * 1.35;
-      }
-      page.drawRectangle({ x: margin, y: y + 4, width: maxW, height: 1, color: rgb(0.85, 0.85, 0.88) });
-      y -= 8;
-    } else if (trimmed.startsWith('## ')) {
-      const size = baseFontSize * 1.4;
-      ensureSpace(size * 1.8);
-      y -= 6;
-      const lines = wrapTextLines(trimmed.slice(3), fontBold, size, maxW);
-      for (const l of lines) {
-        ensureSpace(size * 1.35);
-        page.drawText(l, { x: margin, y, size, font: fontBold, color: rgb(0.08, 0.08, 0.1) });
-        y -= size * 1.35;
-      }
-      y -= 4;
-    } else if (trimmed.startsWith('### ')) {
-      const size = baseFontSize * 1.18;
-      ensureSpace(size * 1.6);
-      const lines = wrapTextLines(trimmed.slice(4), fontBold, size, maxW);
-      for (const l of lines) {
-        ensureSpace(size * 1.35);
-        page.drawText(l, { x: margin, y, size, font: fontBold, color: rgb(0.12, 0.12, 0.15) });
-        y -= size * 1.35;
-      }
-    } else if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
-      // Markdown table row
-      if (/^\|[\s\-:|]+\|$/.test(trimmed)) continue;
-      const cells = trimmed
-        .slice(1, -1)
-        .split('|')
-        .map((c) => c.trim());
-      const rowH = 18;
-      ensureSpace(rowH + 4);
-      const colW = maxW / Math.max(cells.length, 1);
-      page.drawRectangle({
-        x: margin,
-        y: y - 4,
-        width: maxW,
-        height: rowH,
-        borderColor: rgb(0.8, 0.8, 0.82),
-        borderWidth: 0.5,
-      });
-      cells.forEach((cell, idx) => {
-        const cleanCell = cell.replace(/\*\*/g, '');
-        page.drawText(cleanCell.slice(0, 28), {
-          x: margin + idx * colW + 6,
-          y: y + 1,
-          size: 9,
-          font: fontMono,
-          color: rgb(0.12, 0.12, 0.14),
-        });
-      });
-      y -= rowH;
-    } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-      const cleanItem = trimmed.slice(2).replace(/\*\*(.*?)\*\*/g, '$1');
-      const lines = wrapTextLines(`• ${cleanItem}`, fontRegular, baseFontSize, maxW - 14);
-      for (const l of lines) {
-        ensureSpace(baseFontSize * 1.45);
-        page.drawText(l, { x: margin + 10, y, size: baseFontSize, font: fontRegular, color: rgb(0.12, 0.12, 0.14) });
-        y -= baseFontSize * 1.45;
-      }
-    } else {
-      const cleanPara = trimmed.replace(/\*\*(.*?)\*\*/g, '$1').replace(/`(.*?)`/g, '$1');
-      const lines = wrapTextLines(cleanPara, fontRegular, baseFontSize, maxW);
-      for (const l of lines) {
-        ensureSpace(baseFontSize * 1.45);
-        page.drawText(l, { x: margin, y, size: baseFontSize, font: fontRegular, color: rgb(0.14, 0.14, 0.16) });
-        y -= baseFontSize * 1.45;
-      }
-    }
-  }
-
-  const outBytes = await pdfDoc.save({ useObjectStreams: true });
-  return {
-    bytes: outBytes,
-    filename: outputFilename,
-    mimeType: 'application/pdf',
-    beforeSize: beforeSize || new TextEncoder().encode(content).byteLength,
-    afterSize: outBytes.byteLength,
-    pageCount: pdfDoc.getPageCount(),
-    canChainAsPdf: true,
-    summaryMessage: `Compiled markup into ${pdfDoc.getPageCount()}-page vector PDF.`,
-  };
+  return await renderHtmlOrMarkdownToPdf(content, format, outputFilename, beforeSize, params);
 }
 
 /**
  * Tool 14: HTML / Markdown to PDF
+ * Renders real styled HTML (with CSS, tables, layout, colors, images) or GFM Markdown
+ * into a multi-page PDF with an embedded searchable text layer.
  */
 export async function executeHtmlToPdf(
   file: UploadedFileItem | null,
   params: Record<string, any>
 ): Promise<EngineOutput> {
-  let content = params.rawContent || '';
+  const editorContent = String(params.rawContent || '');
+  let content = editorContent;
   let beforeSize = new TextEncoder().encode(content).byteLength;
-  let outName = 'compiled_markup.pdf';
+  let outName = 'document.pdf';
 
   if (file) {
-    content = new TextDecoder().decode(file.bytes);
-    beforeSize = file.bytes.byteLength;
     outName = file.name.replace(/\.(html|htm|md|markdown|txt)$/i, '') + '.pdf';
+    if (!content.trim()) {
+      content = new TextDecoder().decode(file.bytes);
+      beforeSize = file.bytes.byteLength;
+    }
   }
 
-  return await renderStructuredMarkupToPdf(
-    content,
-    params.sourceFormat === 'html' ? 'html' : 'markdown',
-    outName,
-    beforeSize,
-    params
-  );
+  if (!content.trim()) {
+    throw new Error('Paste HTML or Markdown into the editor, or upload an .html / .md file first.');
+  }
+
+  // Respect explicit toggle, but auto-upgrade to HTML if user pasted full HTML while Markdown tab was selected
+  let effectiveFormat: 'html' | 'markdown' =
+    params.sourceFormat === 'markdown' ? 'markdown' : 'html';
+  if (effectiveFormat === 'markdown' && detectMarkupFormat(content) === 'html') {
+    effectiveFormat = 'html';
+  }
+
+  return await renderHtmlOrMarkdownToPdf(content, effectiveFormat, outName, beforeSize, params);
 }

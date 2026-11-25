@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import {
   Document as DocxDocument,
   HeadingLevel,
+  ImageRun,
   Packer,
   PageBreak,
   Paragraph,
@@ -36,6 +37,7 @@ export async function executePdfToImages(
   const mime = format === 'jpeg' ? 'image/jpeg' : 'image/png';
   const ext = format === 'jpeg' ? 'jpg' : 'png';
   const scale = Number(params.dpiScale || 2);
+  let usedFallbackRender = false;
 
   if (params.mode === 'extract-embedded') {
     onProgress?.('Scanning PDF object catalog for embedded XObject image streams...');
@@ -49,24 +51,20 @@ export async function executePdfToImages(
         const filter = obj.dict.get(PDFName.of('Filter'));
         if (subtype && subtype.toString() === '/Image') {
           const isDct = filter && filter.toString().includes('DCTDecode');
-          const imgExt = isDct ? 'jpg' : 'bin';
-          const imgMime = isDct ? 'image/jpeg' : 'application/octet-stream';
-          const rawBytes = obj.contents;
-          if (rawBytes && rawBytes.byteLength > 128) {
+          if (isDct && obj.contents && obj.contents.byteLength > 128) {
             extractedCount++;
-            const imgName = `${baseName}_embedded_${String(extractedCount).padStart(3, '0')}.${imgExt}`;
-            zip.file(imgName, rawBytes);
-            if (isDct) {
-              secondaryFiles.push({ filename: imgName, bytes: rawBytes, mimeType: imgMime });
-            }
+            const imgName = `${baseName}_embedded_${String(extractedCount).padStart(3, '0')}.jpg`;
+            zip.file(imgName, obj.contents);
+            secondaryFiles.push({ filename: imgName, bytes: obj.contents, mimeType: 'image/jpeg' });
           }
         }
       }
     }
 
-    // Fallback: if the PDF contains only vector graphics and 0 raster XObjects, render high-DPI page plates
     if (extractedCount === 0) {
+      usedFallbackRender = true;
       for (let p = 1; p <= pdfJsDoc.numPages; p++) {
+        onProgress?.(`No raw JPEG XObjects found; rendering page ${p} of ${pdfJsDoc.numPages}...`);
         const rendered = await renderPdfPageToDataUrl(pdfJsDoc, p, scale, mime, 0.92);
         const bytes = Uint8Array.from(atob(rendered.dataUrl.split(',')[1]), (c) => c.charCodeAt(0));
         const imgName = `${baseName}_page_${String(p).padStart(3, '0')}.${ext}`;
@@ -95,56 +93,92 @@ export async function executePdfToImages(
     pageCount: secondaryFiles.length,
     canChainAsPdf: false,
     secondaryFiles,
-    summaryMessage: `Exported ${secondaryFiles.length} ${ext.toUpperCase()} image(s) at ${scale * 72} DPI into ZIP.`,
+    summaryMessage: usedFallbackRender
+      ? `No embedded JPEG objects found; rendered ${secondaryFiles.length} full page ${ext.toUpperCase()} image(s) at ${scale * 72} DPI.`
+      : `Exported ${secondaryFiles.length} ${ext.toUpperCase()} image(s) into ZIP.`,
   };
 }
 
 /**
  * Tool 16: PDF to WORD (.docx)
  * Extracts text blocks, font sizes, and Y-coordinates per page via pdfjs-dist and builds a genuine
- * .docx file using the docx library (preserving headings, paragraphs, and page breaks).
+ * .docx file using the docx library (preserving headings, paragraphs, page breaks, and image fallback for scanned pages).
  */
 export async function executePdfToWord(
   file: UploadedFileItem,
   params: Record<string, any>
 ): Promise<EngineOutput> {
   const { items, pageDimensions } = await extractPositionedTextFromPdf(file.bytes);
+  const pdfJsDoc = await loadPdfJsDocument(file.bytes);
   const children: Paragraph[] = [];
+
+  // Compute median body font size across document so headings are detected accurately
+  const allFontSizes = items
+    .filter((it) => it.str.trim())
+    .map((it) => it.fontSize)
+    .sort((a, b) => a - b);
+  const bodyFontSize =
+    allFontSizes.length > 0 ? allFontSizes[Math.floor(allFontSizes.length * 0.5)] : 11;
 
   for (let pIdx = 0; pIdx < pageDimensions.length; pIdx++) {
     const pageItems = items
       .filter((it) => it.pageIndex === pIdx && it.str.trim())
       .sort((a, b) => a.y - b.y || a.x - b.x);
 
-    // Group items on same line
-    const lineGroups: { y: number; maxFontSize: number; text: string }[] = [];
-    for (const it of pageItems) {
-      const existing = lineGroups.find((g) => Math.abs(g.y - it.y) <= 4.5);
-      if (existing) {
-        existing.text += ' ' + it.str.trim();
-        existing.maxFontSize = Math.max(existing.maxFontSize, it.fontSize);
-      } else {
-        lineGroups.push({ y: it.y, maxFontSize: it.fontSize, text: it.str.trim() });
+    if (pageItems.length === 0) {
+      // Scanned or image-only page: embed rendered page image into the Word document
+      try {
+        const rendered = await renderPdfPageToDataUrl(pdfJsDoc, pIdx + 1, 1.5, 'image/png', 0.9);
+        const pngBytes = Uint8Array.from(atob(rendered.dataUrl.split(',')[1]), (c) =>
+          c.charCodeAt(0)
+        );
+        const maxW = 580;
+        const aspect = rendered.height / Math.max(1, rendered.width);
+        children.push(
+          new Paragraph({
+            children: [
+              new ImageRun({
+                data: pngBytes,
+                type: 'png',
+                transformation: { width: maxW, height: Math.round(maxW * aspect) },
+              }),
+            ],
+          })
+        );
+      } catch {
+        children.push(new Paragraph({ children: [new TextRun('(Image page)')] }));
       }
-    }
+    } else {
+      const lineGroups: { y: number; maxFontSize: number; text: string }[] = [];
+      for (const it of pageItems) {
+        const existing = lineGroups.find((g) => Math.abs(g.y - it.y) <= Math.max(4, it.fontSize * 0.4));
+        if (existing) {
+          existing.text += (existing.text.endsWith('-') ? '' : ' ') + it.str.trim();
+          existing.maxFontSize = Math.max(existing.maxFontSize, it.fontSize);
+        } else {
+          lineGroups.push({ y: it.y, maxFontSize: it.fontSize, text: it.str.trim() });
+        }
+      }
 
-    for (const line of lineGroups) {
-      const isH1 = params.detectHeadings !== false && line.maxFontSize >= 15;
-      const isH2 = params.detectHeadings !== false && !isH1 && line.maxFontSize >= 12.5;
+      for (const line of lineGroups) {
+        const isH1 = params.detectHeadings !== false && line.maxFontSize >= bodyFontSize * 1.45;
+        const isH2 =
+          params.detectHeadings !== false && !isH1 && line.maxFontSize >= bodyFontSize * 1.2;
 
-      children.push(
-        new Paragraph({
-          heading: isH1 ? HeadingLevel.HEADING_1 : isH2 ? HeadingLevel.HEADING_2 : undefined,
-          spacing: { after: 160 },
-          children: [
-            new TextRun({
-              text: line.text,
-              bold: isH1 || isH2,
-              size: Math.round(line.maxFontSize * 2), // docx uses half-points
-            }),
-          ],
-        })
-      );
+        children.push(
+          new Paragraph({
+            heading: isH1 ? HeadingLevel.HEADING_1 : isH2 ? HeadingLevel.HEADING_2 : undefined,
+            spacing: { after: isH1 || isH2 ? 200 : 120 },
+            children: [
+              new TextRun({
+                text: line.text,
+                bold: isH1 || isH2,
+                size: Math.min(56, Math.max(16, Math.round(line.maxFontSize * 2))),
+              }),
+            ],
+          })
+        );
+      }
     }
 
     if (params.preservePageBreaks !== false && pIdx < pageDimensions.length - 1) {
@@ -153,7 +187,9 @@ export async function executePdfToWord(
   }
 
   if (children.length === 0) {
-    children.push(new Paragraph({ children: [new TextRun('No extractable text layer found in PDF.')] }));
+    children.push(
+      new Paragraph({ children: [new TextRun('No extractable content found in PDF.')] })
+    );
   }
 
   const doc = new DocxDocument({
@@ -178,7 +214,7 @@ export async function executePdfToWord(
 
 /**
  * Tool 17: PDF to POWERPOINT (.pptx)
- * Renders PDF pages and text layers into a genuine downloadable .pptx presentation deck using pptxgenjs.
+ * Renders PDF pages and properly Y-grouped text lines into a downloadable 16:9 .pptx deck.
  */
 export async function executePdfToPowerpoint(
   file: UploadedFileItem,
@@ -188,8 +224,8 @@ export async function executePdfToPowerpoint(
   const pdfJsDoc = await loadPdfJsDocument(file.bytes);
   const { items } = await extractPositionedTextFromPdf(file.bytes);
   const pptx = new PptxGenJS();
-  pptx.layout = 'LAYOUT_16x9';
-  pptx.author = 'MONO PDF';
+  pptx.layout = 'LAYOUT_16x9'; // 10 x 5.625 inches
+  pptx.author = 'pdf tools';
   pptx.title = file.name.replace(/\.pdf$/i, '');
 
   const mode = params.mode || 'hybrid';
@@ -200,13 +236,25 @@ export async function executePdfToPowerpoint(
     const slide = pptx.addSlide();
 
     if (mode === 'visual-slides' || mode === 'hybrid') {
-      const rendered = await renderPdfPageToDataUrl(pdfJsDoc, p, scale, 'image/jpeg', 0.85);
+      const rendered = await renderPdfPageToDataUrl(pdfJsDoc, p, scale, 'image/jpeg', 0.88);
+      const boxW = mode === 'hybrid' ? 4.4 : 9.2;
+      const boxH = 4.95;
+      const aspect = rendered.width / Math.max(1, rendered.height);
+      let drawW = boxW;
+      let drawH = drawW / aspect;
+      if (drawH > boxH) {
+        drawH = boxH;
+        drawW = drawH * aspect;
+      }
+      const startX = mode === 'hybrid' ? 5.25 + (boxW - drawW) / 2 : (10 - drawW) / 2;
+      const startY = 0.34 + (boxH - drawH) / 2;
+
       slide.addImage({
         data: rendered.dataUrl,
-        x: mode === 'hybrid' ? 5.2 : 0.5,
-        y: 0.35,
-        w: mode === 'hybrid' ? 4.4 : 9.0,
-        h: 4.9,
+        x: startX,
+        y: startY,
+        w: drawW,
+        h: drawH,
       });
     }
 
@@ -214,12 +262,24 @@ export async function executePdfToPowerpoint(
       const pageItems = items
         .filter((it) => it.pageIndex === p - 1 && it.str.trim())
         .sort((a, b) => a.y - b.y || a.x - b.x);
-      const textLines = pageItems.map((it) => it.str.trim()).join('\n');
-      slide.addText(textLines || `Slide ${p}`, {
+
+      // Group text runs sharing the same Y-coordinate into clean lines
+      const lines: { y: number; text: string }[] = [];
+      for (const it of pageItems) {
+        const existing = lines.find((l) => Math.abs(l.y - it.y) <= 4.5);
+        if (existing) {
+          existing.text += ' ' + it.str.trim();
+        } else {
+          lines.push({ y: it.y, text: it.str.trim() });
+        }
+      }
+
+      const combinedText = lines.map((l) => l.text).join('\n') || `Slide ${p}`;
+      slide.addText(combinedText, {
         x: 0.4,
         y: 0.4,
-        w: mode === 'hybrid' ? 4.5 : 9.2,
-        h: 4.8,
+        w: mode === 'hybrid' ? 4.6 : 9.2,
+        h: 4.85,
         fontSize: 12,
         color: '18181B',
         valign: 'top',
@@ -244,8 +304,6 @@ export async function executePdfToPowerpoint(
 
 /**
  * Tool 18: PDF to EXCEL (.xlsx)
- * Extracts text items with X/Y coordinates via pdfjs-dist, groups items sharing Y-rows and X-columns
- * into structured tabular arrays, and exports a real multi-sheet .xlsx file using SheetJS.
  */
 export async function executePdfToExcel(
   file: UploadedFileItem,
@@ -290,8 +348,6 @@ export async function executePdfToExcel(
 
 /**
  * Tool 19: PDF to PDF/A
- * Rewrites PDF metadata and embeds valid ISO PDF/A-1b or PDF/A-2b XMP conformance XML metadata streams
- * into the PDF catalog via pdf-lib, plus produces a "PDF/A Compliance Inspector" report.
  */
 export async function executePdfToPdfA(
   file: UploadedFileItem,
@@ -301,15 +357,22 @@ export async function executePdfToPdfA(
   const level = params.conformanceLevel === 'PDF/A-1b' ? 'PDF/A-1b' : 'PDF/A-2b';
   const partNum = level === 'PDF/A-1b' ? '1' : '2';
   const title = params.documentTitle || file.name.replace(/\.pdf$/i, '');
-  const author = params.documentAuthor || 'MONO PDF Compliance Engine';
+  const author = params.documentAuthor || 'pdf tools Compliance Engine';
   const nowIso = new Date().toISOString();
 
   pdfDoc.setTitle(title);
   pdfDoc.setAuthor(author);
-  pdfDoc.setProducer(`MONO PDF ISO ${level} Archival Engine`);
-  pdfDoc.setCreator('MONO PDF');
+  pdfDoc.setProducer(`pdf tools ISO ${level} Archival Engine`);
+  pdfDoc.setCreator('pdf tools');
   pdfDoc.setCreationDate(new Date());
   pdfDoc.setModificationDate(new Date());
+
+  const escapeXml = (str: string) =>
+    str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
 
   const xmpXml = `<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/">
@@ -323,10 +386,10 @@ export async function executePdfToPdfA(
       <pdfaid:conformance>B</pdfaid:conformance>
       <xmp:CreateDate>${nowIso}</xmp:CreateDate>
       <xmp:ModifyDate>${nowIso}</xmp:ModifyDate>
-      <xmp:CreatorTool>MONO PDF Archival Suite</xmp:CreatorTool>
-      <pdf:Producer>MONO PDF ISO ${level} Engine</pdf:Producer>
-      <dc:title><rdf:Alt><rdf:li xml:lang="x-default">${title}</rdf:li></rdf:Alt></dc:title>
-      <dc:creator><rdf:Seq><rdf:li>${author}</rdf:li></rdf:Seq></dc:creator>
+      <xmp:CreatorTool>pdf tools Archival Suite</xmp:CreatorTool>
+      <pdf:Producer>pdf tools ISO ${level} Engine</pdf:Producer>
+      <dc:title><rdf:Alt><rdf:li xml:lang="x-default">${escapeXml(title)}</rdf:li></rdf:Alt></dc:title>
+      <dc:creator><rdf:Seq><rdf:li>${escapeXml(author)}</rdf:li></rdf:Seq></dc:creator>
     </rdf:Description>
   </rdf:RDF>
 </x:xmpmeta>

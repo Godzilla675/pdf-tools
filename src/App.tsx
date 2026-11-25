@@ -18,6 +18,8 @@ import { CenterCanvas } from './components/CenterCanvas';
 import { RightInspector } from './components/RightInspector';
 import { CommandPaletteModal } from './components/CommandPaletteModal';
 import { loadPdfJsDocument, renderPdfPageToDataUrl } from './utils/pdfjsClient';
+import { detectMarkupFormat } from './utils/htmlPdfRenderer';
+import { renderPptxThumbnails } from './utils/pptxToPdfRenderer';
 
 // Engine imports (All 33 tools + Workflows)
 import {
@@ -68,9 +70,68 @@ import {
   executePdfToMarkdown,
   executeTranslatePdf,
   executeWorkflowPipeline,
+  fetchCloudAiStatus,
 } from './engines/aiEngine';
 
 const WORKFLOW_STORAGE_KEY = 'mono_pdf_saved_workflows_v1';
+
+function isPdfFile(f: UploadedFileItem): boolean {
+  return f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+}
+
+function isImageFile(f: UploadedFileItem): boolean {
+  return f.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(f.name);
+}
+
+function fileCompatibleWithTool(f: UploadedFileItem, acceptedFormats: string): boolean {
+  const tokens = acceptedFormats
+    .toLowerCase()
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean);
+  if (tokens.includes('*') || tokens.includes('*/*')) return true;
+
+  const lowerName = f.name.toLowerCase();
+  const lowerType = (f.type || '').toLowerCase();
+  return tokens.some((tok) => {
+    if (tok === 'image/*') return isImageFile(f);
+    if (tok.startsWith('.')) return lowerName.endsWith(tok);
+    return lowerType === tok;
+  });
+}
+
+async function readImageThumbnail(
+  fileItem: UploadedFileItem,
+  idx: number
+): Promise<RenderedPageThumbnail | null> {
+  return new Promise((resolve) => {
+    const blob = new Blob([fileItem.bytes as unknown as BlobPart], {
+      type: fileItem.type || 'image/png',
+    });
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '');
+      const img = new Image();
+      img.onload = () => {
+        resolve({
+          pageIndex: idx,
+          originalPageIndex: 0,
+          sourceFileId: fileItem.id,
+          pageNumber: idx + 1,
+          width: img.naturalWidth || 800,
+          height: img.naturalHeight || 600,
+          rotation: 0,
+          dataUrl,
+          selected: false,
+        });
+      };
+      img.onerror = () => resolve(null);
+      img.src = dataUrl;
+    };
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(blob);
+  });
+}
 
 export default function App() {
   const [isHomeView, setIsHomeView] = useState<boolean>(true);
@@ -97,6 +158,10 @@ export default function App() {
   );
   const [capturedScans, setCapturedScans] = useState<string[]>([]);
 
+  const [cloudAiStatus, setCloudAiStatus] = useState<{ configured: boolean; model: string }>({
+    configured: false,
+    model: 'gemini-4-hydrogen',
+  });
   const [aiSettings, setAiSettings] = useState<AiEngineSettings>({
     mode: 'offline-extractive',
     ollamaUrl: 'http://localhost:11434',
@@ -134,6 +199,21 @@ export default function App() {
   const activeTool = getToolById(activeToolId);
   const currentParams = toolParamsMap[activeToolId] || activeTool.defaultParams;
 
+  // Check whether server-side Cloud AI (GEMINI_API_KEY) is configured on startup
+  useEffect(() => {
+    let active = true;
+    fetchCloudAiStatus().then((status) => {
+      if (!active) return;
+      setCloudAiStatus(status);
+      if (status.configured) {
+        setAiSettings((prev) => ({ ...prev, mode: 'cloud-gemini' }));
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   // Apply Dark / Light / System mode to <html>
   useEffect(() => {
     const root = document.documentElement;
@@ -164,12 +244,13 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Render visual page thumbnails whenever PDF files change
+  // Render visual page thumbnails whenever PDF, PPTX, or image files change
   const rebuildThumbnailsFromFiles = useCallback(async (fileList: UploadedFileItem[]) => {
-    const pdfFiles = fileList.filter(
-      (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name)
-    );
-    if (pdfFiles.length === 0) {
+    const pdfFiles = fileList.filter(isPdfFile);
+    const imgFiles = fileList.filter(isImageFile);
+    const pptxFiles = fileList.filter((f) => /\.pptx$/i.test(f.name));
+
+    if (pdfFiles.length === 0 && imgFiles.length === 0 && pptxFiles.length === 0) {
       setThumbnails([]);
       setDetectedAcroFields([]);
       return;
@@ -177,59 +258,97 @@ export default function App() {
 
     setIsLoadingThumbnails(true);
     try {
-      const rendered: RenderedPageThumbnail[] = [];
-      let globalIdx = 0;
+      if (pdfFiles.length > 0) {
+        const rendered: RenderedPageThumbnail[] = [];
+        let globalIdx = 0;
 
-      for (const f of pdfFiles) {
-        try {
-          const pdfDoc = await loadPdfJsDocument(f.bytes);
-          for (let p = 1; p <= pdfDoc.numPages; p++) {
-            const pageRender = await renderPdfPageToDataUrl(
-              pdfDoc,
-              p,
-              1.35,
-              'image/jpeg',
-              0.92
-            );
-            rendered.push({
-              pageIndex: globalIdx,
-              originalPageIndex: p - 1,
-              sourceFileId: f.id,
-              pageNumber: p,
-              width: pageRender.width,
-              height: pageRender.height,
-              rotation: 0,
-              dataUrl: pageRender.dataUrl,
-              selected: false,
-            });
-            globalIdx++;
+        for (const f of pdfFiles) {
+          try {
+            const pdfDoc = await loadPdfJsDocument(f.bytes);
+            for (let p = 1; p <= pdfDoc.numPages; p++) {
+              const pageRender = await renderPdfPageToDataUrl(
+                pdfDoc,
+                p,
+                1.35,
+                'image/jpeg',
+                0.92
+              );
+              rendered.push({
+                pageIndex: globalIdx,
+                originalPageIndex: p - 1,
+                sourceFileId: f.id,
+                pageNumber: p,
+                width: pageRender.width,
+                height: pageRender.height,
+                rotation: 0,
+                dataUrl: pageRender.dataUrl,
+                selected: false,
+              });
+              globalIdx++;
+            }
+          } catch {
+            // Encrypted PDF awaiting password in Unlock PDF
           }
-        } catch {
-          // Encrypted PDF awaiting password in Unlock PDF
         }
+
+        setThumbnails(rendered);
+        setActivePageIndex(0);
+
+        const fields = await inspectPdfAcroFields(pdfFiles[0].bytes);
+        setDetectedAcroFields(fields);
+        const initialVals: Record<string, string | boolean> = {};
+        fields.forEach((fld) => {
+          initialVals[fld.name] = fld.value;
+        });
+        setAcroFieldValues(initialVals);
+      } else if (pptxFiles.length > 0) {
+        try {
+          const slideThumbs = await renderPptxThumbnails(pptxFiles[0].bytes, pptxFiles[0].id);
+          setThumbnails(slideThumbs);
+          setFiles((prev) =>
+            prev.map((item) =>
+              item.id === pptxFiles[0].id
+                ? { ...item, pageCount: slideThumbs.length || item.pageCount }
+                : item
+            )
+          );
+        } catch {
+          setThumbnails([]);
+        }
+        setDetectedAcroFields([]);
+        setActivePageIndex(0);
+      } else {
+        // Generate visual image previews for Images to PDF / Scan to PDF
+        const imgThumbs: RenderedPageThumbnail[] = [];
+        for (let i = 0; i < imgFiles.length; i++) {
+          const thumb = await readImageThumbnail(imgFiles[i], i);
+          if (thumb) imgThumbs.push(thumb);
+        }
+        setThumbnails(imgThumbs);
+        setDetectedAcroFields([]);
+        setActivePageIndex(0);
       }
-
-      setThumbnails(rendered);
-      setActivePageIndex(0);
-
-      const fields = await inspectPdfAcroFields(pdfFiles[0].bytes);
-      setDetectedAcroFields(fields);
-      const initialVals: Record<string, string | boolean> = {};
-      fields.forEach((fld) => {
-        initialVals[fld.name] = fld.value;
-      });
-      setAcroFieldValues(initialVals);
     } finally {
       setIsLoadingThumbnails(false);
     }
   }, []);
 
   const handleSelectTool = (toolId: ToolId) => {
+    const def = getToolById(toolId);
     setActiveToolId(toolId);
     setIsHomeView(false);
     setErrorMessage('');
     setLastOutput(null);
-    const def = getToolById(toolId);
+    setAnnotations([]);
+
+    // Filter out files that aren't compatible with the newly selected tool
+    const compatible = files.filter((f) => fileCompatibleWithTool(f, def.acceptedFormats));
+    const nextFiles = def.multipleFiles ? compatible : compatible.slice(0, 1);
+    if (nextFiles.length !== files.length) {
+      setFiles(nextFiles);
+      rebuildThumbnailsFromFiles(nextFiles);
+    }
+
     setToolParamsMap((prev) => ({
       ...prev,
       [toolId]: prev[toolId] || { ...def.defaultParams },
@@ -266,7 +385,25 @@ export default function App() {
       });
     }
 
+    // For HTML / Markdown to PDF, load file contents straight into the live editor and auto-detect format
+    if (activeToolId === 'html-to-pdf' && newItems[0]) {
+      const decoded = new TextDecoder().decode(newItems[0].bytes);
+      const detectedFormat = detectMarkupFormat(decoded, newItems[0].name);
+      setToolParamsMap((prev) => ({
+        ...prev,
+        'html-to-pdf': {
+          ...(prev['html-to-pdf'] || getToolById('html-to-pdf').defaultParams),
+          rawContent: decoded,
+          sourceFormat: detectedFormat,
+        },
+      }));
+    }
+
     const combined = activeTool.multipleFiles ? [...files, ...newItems] : [newItems[0]];
+    if (!activeTool.multipleFiles) {
+      setThumbnails([]);
+      setAnnotations([]);
+    }
     setFiles(combined);
     await rebuildThumbnailsFromFiles(combined);
   };
@@ -438,7 +575,7 @@ export default function App() {
           output = await executeWordToPdf(primaryFile, currentParams);
           break;
         case 'powerpoint-to-pdf':
-          output = await executePowerpointToPdf(primaryFile, currentParams);
+          output = await executePowerpointToPdf(primaryFile, currentParams, setProgressMessage);
           break;
         case 'excel-to-pdf':
           output = await executeExcelToPdf(primaryFile, currentParams);
@@ -511,10 +648,14 @@ export default function App() {
           );
           break;
         case 'compare-pdf': {
-          const secondFile = files[1] || primaryFile;
+          if (files.length < 2) {
+            throw new Error(
+              'Please upload two PDF files (Document A and Document B) to compare.'
+            );
+          }
           output = await executeComparePdf(
             primaryFile,
-            secondFile,
+            files[1],
             currentParams,
             setProgressMessage
           );
@@ -608,11 +749,18 @@ export default function App() {
       lastModified: Date.now(),
     };
 
+    const nextDef = getToolById(nextToolId);
     setActiveToolId(nextToolId);
     setIsHomeView(false);
     setLastOutput(null);
     setErrorMessage('');
     setAnnotations([]);
+    setThumbnails([]);
+    setActivePageIndex(0);
+    setToolParamsMap((prev) => ({
+      ...prev,
+      [nextToolId]: prev[nextToolId] || { ...nextDef.defaultParams },
+    }));
     setFiles([chainedFile]);
     await rebuildThumbnailsFromFiles([chainedFile]);
   };
@@ -626,7 +774,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#f8f9fa] text-[#202124] dark:bg-[#0d1117] dark:text-[#f0f6fc]">
-      {/* iLovePDF + Kaggle Top Navigation Bar */}
+      {/* Top Navigation Bar */}
       <TopNavbar
         isHomeView={isHomeView}
         activeToolId={activeToolId}
@@ -637,7 +785,7 @@ export default function App() {
         onChangeTheme={setThemeMode}
       />
 
-      {/* Main Content Area: Either iLovePDF All-Tools Grid OR Active Tool Workspace */}
+      {/* Main Content Area: Either All-Tools Grid OR Active Tool Workspace */}
       {isHomeView ? (
         <HomeToolsGrid
           activeCategory={activeCategory}
@@ -645,7 +793,7 @@ export default function App() {
           onSelectTool={handleSelectTool}
         />
       ) : (
-        <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 flex items-start">
           <CenterCanvas
             tool={activeTool}
             files={files}
@@ -703,6 +851,7 @@ export default function App() {
               onChangeParam={handleChangeParam}
               aiSettings={aiSettings}
               onChangeAiSettings={setAiSettings}
+              cloudAiStatus={cloudAiStatus}
               isProcessing={isProcessing}
               progressMessage={progressMessage}
               errorMessage={errorMessage}

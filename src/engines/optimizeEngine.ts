@@ -10,11 +10,9 @@ import {
 
 /**
  * Tool 7: Compress PDF
- * Re-renders pages via pdfjs-dist to canvas at selectable presets:
- *  - Extreme (0.4 JPEG quality, 1.0x scale)
- *  - Recommended (0.65 JPEG quality, 1.25x scale)
- *  - Less (0.85 JPEG quality, 1.5x scale)
- * Rebuilds via pdf-lib with object streams enabled and reports Before Size, After Size, and % Saved.
+ * Compares smart lossless structural re-serialization (object streams) against
+ * JPEG page re-compression at Extreme / Recommended / Less presets so clean vector PDFs
+ * never bloat unnecessarily unless Extreme or Grayscale rasterization is explicitly requested.
  */
 export async function executeCompressPdf(
   file: UploadedFileItem,
@@ -29,9 +27,23 @@ export async function executeCompressPdf(
       ? { quality: 0.85, scale: 1.5 }
       : { quality: 0.65, scale: 1.25 };
 
+  const beforeSize = file.bytes.byteLength;
   const pdfJsDoc = await loadPdfJsDocument(file.bytes);
-  const outDoc = await PDFDocument.create();
 
+  // 1. Compute lossless structural optimization (re-indexed object streams)
+  let losslessBytes: Uint8Array | null = null;
+  if (!params.grayscale) {
+    try {
+      onProgress?.('Analyzing structural PDF streams...');
+      const srcDoc = await PDFDocument.load(file.bytes, { ignoreEncryption: true });
+      losslessBytes = await srcDoc.save({ useObjectStreams: true, addDefaultPage: false });
+    } catch {
+      losslessBytes = null;
+    }
+  }
+
+  // 2. Compute rasterized JPEG compression
+  const outDoc = await PDFDocument.create();
   for (let p = 1; p <= pdfJsDoc.numPages; p++) {
     onProgress?.(`Compressing page ${p} of ${pdfJsDoc.numPages} (${preset.toUpperCase()})...`);
     const { canvas, width, height } = await renderPdfPageToCanvas(pdfJsDoc, p, config.scale);
@@ -63,35 +75,44 @@ export async function executeCompressPdf(
     });
   }
 
-  const outBytes = await outDoc.save({ useObjectStreams: true });
-  const beforeSize = file.bytes.byteLength;
-  const afterSize = outBytes.byteLength;
+  const rasterBytes = await outDoc.save({ useObjectStreams: true });
+
+  // Pick lossless structural output when rasterizing a lightweight text PDF would inflate file size
+  const useLossless =
+    !params.grayscale &&
+    preset !== 'extreme' &&
+    losslessBytes !== null &&
+    losslessBytes.byteLength < rasterBytes.byteLength;
+
+  const finalBytes = useLossless ? losslessBytes! : rasterBytes;
+  const afterSize = finalBytes.byteLength;
   const delta = calculateByteDelta(beforeSize, afterSize);
 
   return {
-    bytes: outBytes,
+    bytes: finalBytes,
     filename: `${file.name.replace(/\.pdf$/i, '')}_compressed.pdf`,
     mimeType: 'application/pdf',
     beforeSize,
     afterSize,
-    pageCount: outDoc.getPageCount(),
+    pageCount: pdfJsDoc.numPages,
     canChainAsPdf: true,
     report: {
       Preset: preset.toUpperCase(),
-      'JPEG Quality': `${Math.round(config.quality * 100)}%`,
-      'Scale Factor': `${config.scale}x`,
+      Method: useLossless
+        ? 'Lossless Object Stream Optimization (Preserved Vector Text)'
+        : `JPEG Raster (${Math.round(config.quality * 100)}% Quality, ${config.scale}x Scale)`,
       'Before Size': formatBytes(beforeSize),
       'After Size': formatBytes(afterSize),
       'Byte Delta': delta.percentSaved,
     },
-    summaryMessage: `Compressed ${outDoc.getPageCount()} page(s): ${formatBytes(beforeSize)} → ${formatBytes(afterSize)} (${delta.percentSaved}).`,
+    summaryMessage: useLossless
+      ? `Vector PDF optimized structurally (${formatBytes(beforeSize)} → ${formatBytes(afterSize)}, ${delta.percentSaved}) without raster bloat.`
+      : `Compressed ${pdfJsDoc.numPages} page(s): ${formatBytes(beforeSize)} → ${formatBytes(afterSize)} (${delta.percentSaved}).`,
   };
 }
 
 /**
  * Tool 8: Repair PDF
- * Uses fault-tolerant stream parsing via pdfjs-dist and pdf-lib recovery to reconstruct
- * valid page trees, clean metadata, and fresh cross-reference tables.
  */
 export async function executeRepairPdf(
   file: UploadedFileItem,
@@ -114,7 +135,6 @@ export async function executeRepairPdf(
     copied.forEach((p) => repairedDoc.addPage(p));
     recoveredPages = copied.length;
   } catch {
-    // Deep stream fallback via pdfjs-dist fault-tolerant renderer + text stream reconstruction
     recoveredMethod = 'Deep Stream Raster & Text Layer Recovery';
     const pdfJsDoc = await loadPdfJsDocument(file.bytes);
     const { items } = await extractPositionedTextFromPdf(file.bytes);
@@ -128,7 +148,6 @@ export async function executeRepairPdf(
       const page = repairedDoc.addPage([width, height]);
       page.drawImage(jpg, { x: 0, y: 0, width, height });
 
-      // Re-embed text items invisibly so searchability is preserved
       const pageItems = items.filter((it) => it.pageIndex === p - 1);
       for (const it of pageItems) {
         const safeText = it.str.replace(/[^\x20-\x7E]/g, '');
@@ -147,8 +166,8 @@ export async function executeRepairPdf(
   }
 
   if (params.sanitizeMetadata) {
-    repairedDoc.setProducer('MONO PDF Stream Repair Engine');
-    repairedDoc.setCreator('MONO PDF');
+    repairedDoc.setProducer('pdf tools Stream Repair Engine');
+    repairedDoc.setCreator('pdf tools');
     repairedDoc.setModificationDate(new Date());
   }
 
@@ -172,9 +191,7 @@ export async function executeRepairPdf(
 }
 
 /**
- * Tool 9: OCR PDF (100% Offline)
- * Uses tesseract.js on rendered PDF page canvases with per-page progress indicator.
- * Outputs both a searchable PDF (with recognized text embedded) and a downloadable .txt transcript.
+ * Tool 9: OCR PDF
  */
 export async function executeOcrPdf(
   file: UploadedFileItem,
@@ -187,23 +204,34 @@ export async function executeOcrPdf(
   const scale = Number(params.renderScale || 1.5);
   const pageTranscripts: string[] = [];
 
-  // Pre-extract existing text items in case tesseract worker assets are blocked in air-gapped sandboxes
   const existingExtraction = await extractPositionedTextFromPdf(file.bytes);
 
+  let currentPageNum = 1;
   let worker: Awaited<ReturnType<typeof createWorker>> | null = null;
   try {
-    onProgress?.('Initializing local Tesseract.js OCR engine...');
-    worker = await createWorker(params.language || 'eng');
+    onProgress?.('Initializing Tesseract.js OCR engine...');
+    worker = await createWorker(params.language || 'eng', 1, {
+      logger: (m: any) => {
+        if (m?.status && typeof m?.progress === 'number') {
+          onProgress?.(
+            `OCR Page ${currentPageNum}/${pdfJsDoc.numPages}: ${m.status} (${Math.round(
+              m.progress * 100
+            )}%)`
+          );
+        }
+      },
+    });
   } catch {
     worker = null;
   }
 
   try {
     for (let p = 1; p <= pdfJsDoc.numPages; p++) {
+      currentPageNum = p;
       onProgress?.(`Running Optical Character Recognition on Page ${p} of ${pdfJsDoc.numPages}...`);
       const { canvas, width, height } = await renderPdfPageToCanvas(pdfJsDoc, p, scale);
 
-      const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.88);
       const jpgBytes = Uint8Array.from(atob(jpegDataUrl.split(',')[1]), (c) => c.charCodeAt(0));
       const embeddedJpg = await outDoc.embedJpg(jpgBytes);
       const pdfPage = outDoc.addPage([width, height]);
@@ -222,7 +250,7 @@ export async function executeOcrPdf(
           const { data } = await worker.recognize(canvas);
           recognizedPageText = (data.text || '').trim();
 
-          if (params.embedSearchableLayer && recognizedPageText) {
+          if (params.embedSearchableLayer !== false && recognizedPageText) {
             const lines = recognizedPageText.split('\n').filter(Boolean);
             const lineStep = height / Math.max(lines.length + 2, 10);
             lines.forEach((line, idx) => {
@@ -240,11 +268,9 @@ export async function executeOcrPdf(
             });
           }
         } catch {
-          // Fallback to stream-level optical glyph reconstruction if worker fails mid-page
           recognizedPageText = existingExtraction.pageTexts[p - 1] || '';
         }
       } else {
-        // Offline deterministic glyph/stream fallback if WASM CDN worker is blocked
         recognizedPageText = existingExtraction.pageTexts[p - 1] || '';
         const pageItems = existingExtraction.items.filter((it) => it.pageIndex === p - 1);
         for (const it of pageItems) {

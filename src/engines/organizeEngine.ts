@@ -53,6 +53,31 @@ export async function executeMergePdf(
         mergedPdf.addPage(copiedPage);
       }
     }
+  } else if (
+    (params.sortOrder || 'custom') === 'custom' &&
+    thumbnails.length > 0
+  ) {
+    // Respect exact visual page order, rotations, duplicates, deletions, and inserted blank pages
+    const loadedMap = new Map<string, PDFDocument>();
+    for (const f of orderedFiles) {
+      loadedMap.set(f.id, await PDFDocument.load(f.bytes, { ignoreEncryption: true }));
+    }
+    for (const thumb of thumbnails) {
+      if (thumb.isBlank) {
+        const blank = mergedPdf.addPage([thumb.width || 595.28, thumb.height || 841.89]);
+        if (thumb.rotation) blank.setRotation(degrees(thumb.rotation % 360));
+        continue;
+      }
+      const srcDoc = loadedMap.get(thumb.sourceFileId);
+      if (srcDoc && thumb.originalPageIndex < srcDoc.getPageCount()) {
+        const [copiedPage] = await mergedPdf.copyPages(srcDoc, [thumb.originalPageIndex]);
+        if (thumb.rotation) {
+          const currentRot = copiedPage.getRotation().angle;
+          copiedPage.setRotation(degrees((currentRot + thumb.rotation) % 360));
+        }
+        mergedPdf.addPage(copiedPage);
+      }
+    }
   } else {
     for (const file of orderedFiles) {
       const srcDoc = await PDFDocument.load(file.bytes, { ignoreEncryption: true });
