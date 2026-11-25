@@ -1,7 +1,7 @@
 {
   "name": "pdf-tools",
   "productName": "pdf tools",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Offline PDF Tools Suite for macOS and Windows",
   "main": "electron/main.cjs",
   "private": true,
@@ -11,7 +11,7 @@
     "start": "node server.ts",
     "build": "vite build",
     "preview": "vite preview",
-    "dist:mac": "vite build && electron-builder --mac dmg zip --publish never",
+    "dist:mac": "vite build && electron-builder --mac --publish never",
     "dist:win": "vite build && electron-builder --win --publish never",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
@@ -54,6 +54,7 @@
   "build": {
     "appId": "com.pdftools.desktop",
     "productName": "pdf tools",
+    "afterPack": "scripts/adhoc-sign-mac.cjs",
     "directories": {
       "output": "release"
     },
@@ -65,7 +66,7 @@
     "mac": {
       "icon": "assets/icon.icns",
       "category": "public.app-category.productivity",
-      "identity": null,
+      "artifactName": "pdf-tools-${version}-${arch}.${ext}",
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
       "target": [

@@ -2,15 +2,16 @@ const { app, BrowserWindow, shell, Menu } = require('electron');
 const path = require('path');
 
 function createWindow() {
-  const isMac = process.platform === 'darwin';
+  const isSmokeTest = process.env.PDF_TOOLS_SMOKE_TEST === '1';
 
   const mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 1024,
     minHeight: 700,
+    show: !isSmokeTest,
     backgroundColor: '#09090b',
-    titleBarStyle: isMac ? 'hiddenInset' : 'default',
+    titleBarStyle: 'default',
     icon: path.join(__dirname, '../assets/icon.png'),
     webPreferences: {
       nodeIntegration: false,
@@ -18,6 +19,31 @@ function createWindow() {
       webSecurity: true,
     },
   });
+
+  if (isSmokeTest) {
+    const timer = setTimeout(() => {
+      console.error('[smoke-test] Timed out waiting for window to load');
+      app.exit(1);
+    }, 30000);
+
+    mainWindow.webContents.once('did-finish-load', () => {
+      clearTimeout(timer);
+      console.log('[smoke-test] Window loaded successfully');
+      app.exit(0);
+    });
+
+    mainWindow.webContents.once('did-fail-load', (_event, errorCode, errorDescription) => {
+      clearTimeout(timer);
+      console.error(`[smoke-test] Failed to load window: ${errorCode} ${errorDescription}`);
+      app.exit(1);
+    });
+
+    mainWindow.webContents.once('render-process-gone', (_event, details) => {
+      clearTimeout(timer);
+      console.error(`[smoke-test] Renderer process gone: ${details.reason}`);
+      app.exit(1);
+    });
+  }
 
   if (process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
